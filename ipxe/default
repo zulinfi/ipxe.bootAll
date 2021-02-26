@@ -1,0 +1,2237 @@
+#!ipxe
+:Code_Begin #  Note mainbegin 20190713
+
+prompt --key 0x02 --timeout 500 Press Ctrl-B for the iPXE shell... && shell || 
+#约100行设置标识启动菜单文件中的自动选择项 120行前后为自定义业务环境变量
+#全变量设置 web site:  ddns bodostar.eicp.net and port map 168 - > 80
+#iseq ${next-server} ${gateway} && dhcp ||
+set pxefilename ipxe/bootstrap/default
+set wlanWebServerPort 168
+set wlanFtpServerPort 21
+set wlan_pxe_server bodostar.eicp.net
+set lan_pxe_server 192.168.1.8 #备选服务器ip
+#set 66:ipv4 192.168.1.8
+set lanWebServerPort 88
+set lanNfsServerpath /volume2/pxe
+set lanFtpServerPort 21
+set TryAutoboot:int32 1
+#set keep-san 1
+
+:retry_dhcp
+ifopen
+isset ${ip} || dhcp ||
+#buildarch:  i386 = bios , x86_64 efi = 64-bit
+#platform:  pcbios, efi
+#iseq ${buildarch} x86_64 && set arch x86_64 || set arch i386 ||
+iseq ${platform} efi && set platformStart efi_Start || set platformStart pcbios_Start ||
+cpuid --ext 29         && set arch x86_64         || set arch i386 ||
+cpuid 6 && set pae yes ||
+cpuid --ecx 5 && set vmx yes ||
+cpuid --ext --ecx 2 && set svm yes ||
+isset ${vmx} || isset ${svm} && set hw_virt yes ||
+
+:setcls
+set mark:hex 23
+set mark ${mark:string}
+# ANSI "#" screen sequence - 23
+set Colon:hex 3a
+set Colon ${Colon:string}
+# ANSI ":" screen sequence - 3a
+set space:hex 20:20
+set space ${space:string}
+set CR:hex 0D
+set CR ${CR:string}
+#iseq ${cls} serial && goto setBootProtocol
+set cls:hex 1b:5b:4a
+# ANSI clear screen sequence - "^[[J"
+set cls ${cls:string} 
+set menu-timeout 3000
+set vardebug:int32 0 #debugshowvar 显示常用变量开关
+isset ${menu-default} || set menu-default Exit
+
+#  Note 确定网络启动服务器，并设置网络启动传输协议,本着先内网dhcp服务器->自定服务器->外网服务器, 协议本着先http协议->nfs->ftp->tftp
+iseq ${filename} ${pxefilename} && set EMBED_menu 0 || set EMBED_menu 1 ||
+isset ${boot_server} && goto SetBootURL ||
+isset ${boot_url} && goto pxeServer_defaultMenu ||
+prompt --key 0x17 --timeout 500 Press Ctrl-W from WWW boot... && goto Try_WanBoot ||
+initrd --name default --timeout 1000 tftp://${next-server}/${pxefilename} && goto setBootProtocol || 
+initrd --name default --timeout 1000 tftp://${lan_pxe_server}/${pxefilename} && set next-server ${lan_pxe_server} && goto setBootProtocol ||
+
+:setBootProtocol
+initrd --name default --timeout 2000 http://${next-server}/${pxefilename} && set boot_protocol http && clear server_port && goto SetBootURL || 
+initrd --name default --timeout 2000 http://${next-server}${Colon}${lanWebServerPort}/${pxefilename} && set boot_protocol http && set server_port ${Colon}${lanWebServerPort} && goto SetBootURL || 
+initrd --name default --timeout 2000 nfs://${next-server}${lanNfsServerpath}/${pxefilename} && set boot_protocol nfs && set server_port ${lanNfsServerpath} && goto SetBootURL ||
+initrd --name default --timeout 2000 ftp://${next-server}${Colon}${lanFtpServerPort}/${pxefilename} && set boot_protocol ftp && set server_port ${Colon}${lanFtpServerPort} && goto SetBootURL ||
+initrd --name default --timeout 1000 tftp://${next-server}/${pxefilename} && set boot_protocol tftp && clear server_port && goto SetBootURL || 
+iseq ${TryAutoboot} 2 && goto Try_WanBoot || inc TryAutoboot || # 如果以上全部失败则重试一次
+dhcp && goto retry_dhcp ||
+
+:Try_WanBoot #本地无启动文件则远程尝试Web启动，网络传输协议 http-->ftp
+set boot_server ${wlan_pxe_server} 
+initrd --name default --timeout 3000 http://${wlan_pxe_server}${Colon}${wlanWebServerPort}/${pxefilename} && set boot_protocol http && set server_port ${Colon}${wlanWebServerPort} && goto SetBootURL || 
+initrd --name default --timeout 3000  ftp://${wlan_pxe_server}${Colon}${wlanFtpServerPort}/${pxefilename} && set boot_protocol ftp && set server_port ${Colon}${wlanFtpServerPort} && goto SetBootURL ||
+# prompt --key 0x02  Error! Not find boot server. Press any Ctrl-B to shell , any key autoboot ... && shell  || retry_dhcp ||
+
+:SetBootURL #确定设置网络启动传输协议
+iseq ${boot_server} ${wlan_pxe_server} && set PreHostname BODOSTAR || set PreHostname bodostar ||
+iseq ${boot_server} ${wlan_pxe_server} && set boot_url ${boot_protocol}://${wlan_pxe_server}${server_port} && goto start ||
+iseq ${boot_server} ${wlan_pxe_server} || set boot_server ${next-server} ||
+iseq ${boot_server} ${wlan_pxe_server} || set boot_url ${boot_protocol}://${boot_server}${server_port} ||
+:Code_End
+
+
+:Code_Begin #  Note 取本机iP地址未位数关赋值本地名称 
+
+:start
+set ReturnMenuPoint GetLastIpend && set IPin ${netX/ip} && goto Function_GetLastIp ||
+:GetLastIpend
+set hostname ${PreHostname}${Function_GetLastIp}
+:Code_End
+
+:Code_Begin #  Note 启动后自动取服务器上的如下菜单顺序尝试加载启动
+
+################ipxe/bootstrap/文件夹下依次先后:#############
+#				1.->hostname-${hostname}.ipxe 				#
+#				2.->uuid-${uuid}.ipxe         				#
+#				3.->mac-${mac:hexhyp}.ipxe    				#
+#				4.->bus-${busid:hexhyp}.ipxe  				#
+#				5.->default									#
+###################default文件为最后通用菜单#################
+set boot_ipxe_url ${boot_url}/ipxe # set basedir
+set bootstrap_url ${boot_ipxe_url}/bootstrap
+set menu_url ${bootstrap_url}/default
+set background_picture bodostarRD.png #背景图片文件名称
+iseq ${ServerMenuLoaded} 1 && goto pxeServer_defaultMenu || #如果加载过服务器上的default菜单文件，则跳过再次加载机器特征ipxe与default菜单
+set ServerMenuLoaded 1 && set EMBED_menu 0 
+# if hostname DHCP variable is set and script is present
+isset ${hostname} && chain --replace --autofree ${bootstrap_url}/hostname/${hostname}.ipxe && exit ||
+# if uuid SMBIOS variable is set and script is present
+isset ${uuid} && chain --replace --autofree ${bootstrap_url}/uuid/${uuid}.ipxe && exit ||
+# Boot <bootstrap_url>/mac/01-02-03-04-05-06.ipxe if script is present 这儿可以设置静态ip地址mac绑定
+chain --replace --autofree ${bootstrap_url}/mac/${mac:hexhyp}.ipxe && exit ||
+# Boot <bootstrap_url>/bus/01-80-86-10-0e.ipxe if PCI Intel adapter is present and script is present
+chain --replace --autofree ${bootstrap_url}/bus/${busid:hexhyp}.ipxe && exit ||
+# Boot ${bootstrap_url}/pci/8086100e.ipxe if one type  PCI Intel adapter is present and script is present
+# chain --replace --autofree ${bootstrap_url}/pci/${pci/${busloc}.0.2}${pci/${busloc}.2.2}.ipxe ||
+# Boot ${bootstrap_url}/chip/82541pi.ipxe if one type of PCI Intel adapter is present and script is present
+# chain --replace --autofree ${bootstrap_url}/chip/${chip}.ipxe ||
+chain --replace --autofree ${bootstrap_url}/default && exit || set ServerMenuLoaded 0 && set EMBED_menu 1 && goto ButtomMenu || #设置已尝试机器特征菜单 失败后只显示本地相关功能菜单
+:pxeServer_defaultMenu 
+prompt --key 0x02 --timeout 500  Begin load bootServer ipxemenu and set var Press Ctrl-B for the iPXE shell. && shell ||
+:Code_End
+
+#内建菜单结束 外置菜单default开始 默认启动菜单项
+:Code_Begin #  Note null 开始菜单 bios efi平台菜单分别设计
+
+:MainMenu
+set menu-default WIM_Menu && set menu-timeout 300
+#asus 无源备份服务器请进wimboot WIM_Menu
+#set menu-default thinstation_allmodel && set menu-timeout 1000 
+#set menu-default Exit && set menu-timeout 1000 
+#set menu-default ccboot && set menu-timeout 3000 || #默认启动ccboot 
+cpair --foreground 9 --background 9 1 || 
+cpair --foreground 6 --background 9 3 ||
+console --x 1024 --y 768 --picture ${boot_url}/${background_picture} ||
+##此处为自定义业务环境变量
+# set next-server 192.168.1.8
+# set net0/next-server 192.168.1.8
+# set net0.dhcp/next-server 192.168.1.8
+# set netX/next-server 192.168.1.8
+# set netX.dhcp/next-server 192.168.1.8
+# set 66:string 192.168.1.8
+#set 67:string ipxe/snponly.efi
+
+isset ${ccboot_server} || set ccboot_server 192.168.1.3
+isset ${iscsi_server} || set iscsi_server ${next-server}
+isset ${nfs_server} || set nfs_server ${next-server}
+isset ${ftp_server} || set ftp_server ${next-server}
+isset ${web_server} || set web_server ${next-server}
+set ccboot_tftp_path ${boot_url}/boot/ccboot/tftp ||
+set SyslinuxMemdisk ${boot_url}/syslinux/memdisk ||
+set grub4dos_path ${boot_url}/grub ||
+set EFI_base_path ${boot_url} ||
+set iso_base_path ${boot_url}/boot/iso ||
+set vhd_base_path ${boot_url}/boot/vhd ||
+set wim_base_path ${boot_url}/boot/wim ||
+set img_base_path ${boot_url}/boot/img ||
+set c32_base_path ${boot_url}/syslinux/c32tools/${platform} ||
+set base_iscsi_port 3260 ||
+isset ${hostname} && set target_name ${hostname} || set target_name ${mac:hexhyp} 
+set lun_No 1
+set base_iscsi iscsi:${iscsi_server}::${base_iscsi_port}:${lun_No}: ||
+set base_iqn iqn.2005-08.net.eicp.bodostar ||
+isset ${initiator-iqn} || set initiator-iqn ${base_iqn}:${target_name} ||
+isset ${iscsi_path} || set iscsi_path ${base_iscsi}:${initiator-iqn} ||
+#prompt --key 0x02 --timeout 5000 end set var Press Ctrl-B for the iPXE shell. && shell ||
+goto ${platformStart}
+:Code_End
+
+#begin ipxe pcbios menu
+#End of iPXE uEFI Menu
+
+:Code_Begin #  Note 第一主菜单 
+:efi_Start
+:pcbios_Start
+iseq ${PreHostname} BODOSTAR && cpair --foreground 7 --background 4 2 || 
+set ThisMenu pcbios_Start
+
+menu Boot From ${boot_url}/${filename}
+#item --key 0x107e goTopMenu /  ;  
+isset ${premenu} && item --key 0x08 ${premenu} ..  ; set premenu ${ThisMenu} 
+item --key 0x03 Exit         Exit iPXE and continue Local  boot
+item --gap -- ------------------ ${hostname} ${ip} ${platform} ${arch} Top Menu  ------------------
+item  --key d 		Diskgenius 						[D]iskgenius tools 
+item  --key b 		bodosng 						[B]odostar network ghost
+item  --key 0 		0PE20180808 					[0]pe normal iso (isosanboot or grub4dos map chainloader) 
+item  --key n 		NET0PE20180808 					[N]ET0PE mini iso (isosanboot or grub4dos map chainloader)
+item  --key 4 		grub4dos 						[G]rub4dos http://grub4dos.chenall.net/
+item  --key i 		ipxegrldr 						[I]pxegrldr http://grub4dos.chenall.net/
+item  --key p 		pxelinux 							[P]xelinux (pxelinux.0)  
+item  --key m 		msboot 							[M]icrosoft pxe boot (pxeboot.n12)  
+item  --key w 		bootwin10iso 						[W]in10pe ${arch} (Function_isoSanBoot) 
+item  --key s 		EasyU_v33 						[S]keype ${arch} (Function_isoSanBoot) 
+item  --key u 		USBOS 							[U]SB OS ${arch} (Function_isoSanBoot) 
+item  --key w 		WIM_Menu 						[W]imboot system menu..
+item  --key w 		thinstation2018 					[T]hinstaion 2018
+item  --key w 		grub2explorer						[G]rub2file Explolere..
+item  --key w 		WinPE_menu 						[W]inpe system menu.. 
+item  --key o 		diskless_menu 					[O]ther diskless_menu..
+item  --key o 		recovery_menu 					[R]ecovery_menu..
+item  --key o 		install_menu 					[I]nstall_menu.
+item --gap --	 ------------------------- Utilities ------------------------------ 
+item  --key m 		mem_diag 						[M]emary diag utilities  
+item  --key a 		android-x86 						[A]ndroid-x86-6.0-rc1 
+item  --key h 		hdt 								[H]dt hardware detection tool 
+item --gap --	 ------------------------- manual boot iso / img / gz / iscsi ------------------------------ 
+item  --key 0x157e 	sanbootCustomISO 				[F9]Iso sanboot 
+item  --key 0x167e 	sanbootCustomISCSI 				[F10]Iscsiserver sanboot 
+item  --key 0x177e 	Function_imgBootCustomIMG 		[F11]Img chain (syslinux memdisk)  
+item --gap --	 ------------------------- backup and restore system ------------------------------ 
+item  --key c 		yjhy_a	 						[Y]jhy_a on uefi bios
+item --gap --	 ------------------------- linux and other system ------------------------------ 
+item  --key c 		CloneZillabios 						[C]lonezilla.
+item  --key g 		Gparted_Bios 						[G]parted.
+item  --key a 		AcronisBackup 					[A]cronisbackup.
+item  --key m 		maxdos9 						[M]axdos9 imgfile boot 
+item  --key b 		bodospxe 						[B]odos old pxe menu (local) 
+item  --key b 		bt5 								[B]t5 wirlless 
+item  --key t 		tinycorlinux 						[T]inycorlinux 
+item  --key s 		synology_DSM 					[S]ynology_dsm61 (img)
+item --gap --    ------------------------  diskless_menuenu  -------------------- 
+item  --key c 		ccboot 							[C]cboot diskless_menuoot 
+item  --key e 		biosESXi 							[E]sxi iso ${arch} install vmware 
+item  --key i 		iscsi_sys_menu 						[I]scsi system bootfrom synology_dsm lun
+item  --key t 		thinstation_rdp 					[T]hinstation freerdp  #freerdp包括有citrix vmview 2x vnc rdp vpn etc
+item  --key t 		thinstation_allmodel 				[T]hinstation_allmodel  
+item  --key o 		testphp 							[O]ther test phpmenu
+item  --key l 		efiMemtest 						[L]oad memtest86  
+
+goto ButtomMenu
+:Code_End
+#end of ipxe pcbios menu
+#begin of iPXE uEFI Menu
+
+:Code_Begin #  Note netinfo
+
+:netinfo
+menu Select network card
+item netX Default (netX)
+set idx:int32 0
+:sel_card_loop isset ${net${idx}/mac} || goto sel_card_done
+  item net${idx} net${idx}
+  inc idx && goto sel_card_loop
+:sel_card_done
+choose netcard || goto MainMenu
+:Code_End
+
+:Code_Begin #  Note netinfo_show
+
+:netinfo_show
+menu Network info for ${netcard}
+item --gap Chip:
+item chip ${space} ${${netcard}/chip}
+item --gap MAC:
+item mac ${space} ${${netcard}/mac}
+item --gap IP/mask:
+item ip ${space} ${${netcard}/ip}/${${netcard}/netmask}
+item --gap Gateway:
+item gw ${space} ${${netcard}/gateway}
+item --gap Domain:
+item domain ${space} ${${netcard}/domain}
+item --gap DNS:
+item dns ${space} ${${netcard}/dns}
+item --gap DHCP server:
+item dhcpserver ${space} ${${netcard}/dhcp-server}
+item --gap Next-server:
+item nextserver ${space} ${next-server}
+item --gap Filename:
+item filename ${space} ${${netcard}/filename}
+choose empty ||
+goto MainMenu
+:Code_End
+
+
+:Code_Begin #  Note WIM WInpe子菜单
+
+:WIM_Menu
+set ThisMenu WIM_Menu
+set menu-default ljycslg_win10
+menu ${premenu} --${ThisMenu} --${platform}--${ip}
+item --key 0x5c goTopMenu /  ;  item --key 0x08 ${premenu} ..  ; set premenu ${ThisMenu} 
+item --gap -- -------------------- ${ThisMenu} --------------------
+item  --key e 		EasyU_wim 						[E]asyu_03pe wimboot  
+item  --key e 		easyU_PEX64 						[E]asyu_pex64 wimboot  
+item  --key k 		kqdUEFI_wim 						[K]uaiQiDong wimboot  
+item  --key 0 		0pe_WIM 						[0]pe_wim wimboot 
+item  --key i 		win7wim 						[I]pxe wim win7
+item  --key i 		Win10wim 						[I]pxe wim win10
+item  --key i 		skype 							[I]pxe wim skype
+item  --key w 		ljycslg_win10 						[L]jycslg_pxe wim Win10 PE x86_64
+item  --key v 		vmware-esxi-iscsiboot				[V]mware esxi boot from iscsi
+item  --key v 		vmware-esxi7-iscsiboot				[V]mware esxi 7 boot from iscsi
+item  --key v 		autoInstallESXi 					[V]mware esxi auto install 
+item  --key u 		UEFIpxeClonezilla 					[U]efi pxe clonezilla
+item  --key u 		UEFIpxeGparted 					[U]efi pxe gparted
+item  --key u 		UEFIpxeAcronisBackup 				[U]efi pxe acronisbackup
+item  --key u 		UEFIghost 						[U]efi pxe ghost
+item  --key u 		UEFIghost2 						[U]efi pxe ghost tinycore linux
+
+goto ButtomMenu
+:Code_End
+
+:Code_Begin #  Note diskless_menu 
+
+:diskless_menu
+set ThisMenu diskless_menu
+set menu-default linkVdisk
+menu ${premenu} --${ThisMenu} --${platform}--${ip}
+item --key 0x5c goTopMenu /  ;  item --key 0x08 ${premenu} ..  ; set premenu ${ThisMenu} 
+item --gap -- -------------------- ${ThisMenu} -------------------- 
+item  --key l 		linkVdisk 						[L]inkvdisk etc vhd iso for gho... 
+item  --key f 		freedos 							[F]reedos boot from iscsi 
+item  --key m 		msdos 							[M]s-dos boot from iscsi 
+item  --key u 		ubuntu 							[U]buntu boot from iscsi 
+item  --key 2 		2XOS 							[2]xos 
+item  --key n 		netbootme 						[N]etboot.me 
+item  --key u 		undi_dos 						[U]ndi_dos 
+item  --key b 		bootaoe 							[B]oot on aoe (e0.0) 
+goto ButtomMenu
+:Code_End
+
+:Code_Begin #  Note ISO WInpe子菜单
+
+:WinPE_menu
+set ThisMenu WinPE_menu
+menu ${premenu} --${ThisMenu} --${platform}--${ip}
+item --key 0x5c goTopMenu /  ;  item --key 0x08 ${premenu} ..  ; set premenu ${ThisMenu} 
+item --gap -- -------------------- ${ThisMenu} --------------------
+item  --key v 		vhd_xp 							[V]hd_xp (sanboot)  
+item  --key v 		vhd_w7 							[V]hd_w7 (sanboot)  
+item  --key v 		vhd_w8 							[V]hd_w8 (sanboot)  
+item  --key 0 		memdisk0pe 						[0]pe.iso (memdisk)  
+goto ButtomMenu
+:Code_End
+
+:Code_Begin #  Note recovery_menu
+
+:recovery_menu
+set ThisMenu recovery_menu
+menu ${premenu} --${ThisMenu} --${platform}--${ip}
+item --key 0x5c goTopMenu /  ;  item --key 0x08 ${premenu} ..  ; set premenu ${ThisMenu} 
+item --gap -- -------------------- ${ThisMenu} --------------------
+item  --key s 		sysrcd 							[S]ystemrescuecd 2.6.0  
+item  --key s 		spinrite 							[S]pinrite 6.0  
+item  --key s 		spinrite-msdos						[S]pinrite 6.0 (using ms-dos 6.22)  
+item  --key m 		macrium-winpe					[M]acrium reflect 5.0 rescue cd (winpe 3.1)  
+item  --key m 		macrium-linux						[M]acrium reflect 5.0 rescue cd (linux)  
+item  --key m 		macrium-wimboot					[M]acrium reflect 5.0 rescue cd (winpe 3.1 via wimboot)  
+goto ButtomMenu
+:Code_End
+
+:Code_Begin #  Note mem_diag
+
+:mem_diag
+set ThisMenu mem_diag
+menu ${premenu} --${ThisMenu} --${platform}--${ip}
+item --key 0x5c goTopMenu /  ;  item --key 0x08 ${premenu} ..  ; set premenu ${ThisMenu} 
+item --gap -- -------------------- ${ThisMenu} --------------------
+item  --key h 		hdt 								[H]dt 0.5.0  
+item  --key m 		memtest 						[M]emtest86+ 4.20  
+item  --key m 		memtestnbp 						[M]emtest86+ 4.20 (ipxe)  
+item  --key b 		breakin 							[B]reakin 3.71  
+item  --key d 		dban 							[D]arik's boot and nuke 2.2.6  
+item  --key b 		etdump 							[B]art's etdump 1.2  
+item  --key w 		wdcdiag 							[W]estern digital diagnostics 5.04f  
+goto ButtomMenu
+:Code_End
+
+
+:Code_Begin #  Note install_menu
+
+:install_menu
+set ThisMenu install_menu
+menu ${premenu} --${ThisMenu} --${platform}--${ip}
+item --key 0x5c goTopMenu /  ;  item --key 0x08 ${premenu} ..  ; set premenu ${ThisMenu} 
+item --gap -- -------------------- ${ThisMenu} --------------------
+item  --key f 		freedos-install						[F]reedos 1.1 to iscsi  
+item  --key m 		msdos-install						[M]s-dos 6.22 to iscsi  
+item  --key u 		ubuntu-install-amd64				[U]buntu 12.04 amd64 to iscsi  
+item  --key u 		ubuntu-install-i386					[U]buntu 12.04 i386 to iscsi  
+item  --key w 		windows7-install					[W]indows 7 to iscsi  
+item  --key h 		winpe 							[H]ook windows 7 iscsi and boot winpe  
+item  --key b 		winpe-wimboot					[B]oot winpe using wimboot  
+item  --key u 		ubuntu-installer-amd64-remote 		[U]buntu 12.04 amd64 from public archive  
+item  --key u 		ubuntu-installer-i386-remote 			[U]buntu 12.04 i386 from public archive  
+item  --key u 		ubuntu-install-amd64-local			[U]buntu 12.04 amd64 to local drive(s)  
+item  --key u 		ubuntu-install-i386-local 			[U]buntu 12.04 i386 to local drive(s)  
+item  --key i 		linux 							[I]nstall linux distros  
+item  --key i 		xenclient-install					[I]nstall xenclient 2.1 to local drive  
+goto ButtomMenu
+:Code_End
+
+:Code_Begin #  Note live_menu
+
+:live_menu
+set ThisMenu live_menu
+menu ${premenu} --${ThisMenu} --${platform}--${ip}
+item --key 0x5c goTopMenu /  ;  item --key 0x08 ${premenu} ..  ; set premenu ${ThisMenu} 
+item --gap -- -------------------- ${ThisMenu} --------------------
+item  --key o 		openelec-generic-live				[O]penelec generic 2.0.0 i386  
+item  --key o 		openelec-intel-gma-live				[O]penelec intel gma 2.0.0 amd64  
+item  --key u 		ubuntu-live-1204-amd64			[U]buntu livecd 12.04 amd64  
+item  --key u 		ubuntu-live-1204-i386				[U]buntu livecd 12.04 i386  
+item  --key m 		mythbuntu-live-1204-amd64			[M]ythbuntu livecd 12.04 amd64  
+item  --key m 		mythbuntu-live-1204-i386			[M]ythbuntu livecd 12.04 i386  
+item  --key s 		slitaz-live							[S]litaz 4.0 livecd  
+item  --key b 		smartos 							[B]oot smartos  
+item  --key s 		smartos-pre-ept					[S]martos (pre-ept)  
+item  --key k 		kms-test							[K]ms test kernel  
+goto ButtomMenu
+:Code_End
+
+
+
+:Code_Begin #  Note testphp
+
+:testphp
+chain  ${boot_url}/boot.php?param1=value1&param2=value2
+:Code_End
+
+:Code_Begin #  Note grub2explorer
+
+:grub2explorer
+imgfree
+set root-path ${boot_url}/grub
+console
+kernel ${root-path}/fmldr ||
+chain  --replace --autofree ${root-path}/fmldr --config-file="pxe unload;" ||
+boot || goto failed
+
+set isofilename ${iso_base_path}/grub2explorer.iso
+goto Function_isoSanBoot 
+
+set filename ${boot_url}/managerpxe.kpxe ||
+set net0/filename ${boot_url}/managerpxe.kpxe ||
+set net0.dhcp/filename ${boot_url}/managerpxe.kpxe ||
+set root-path ${boot_url} ||
+imgstat ||
+prompt pause
+chain --replace --autofree ${filename} && exit ||
+:Code_End
+
+
+
+:Code_Begin #  Note iscsi_sys_menu
+
+:iscsi_sys_menu
+set ThisMenu DSM_ISCSI
+set menu-default DSM_ISCSI_1
+menu ${premenu} --${ThisMenu} --${platform}--${ip}
+item --key 0x5c goTopMenu /  ;  item --key 0x08 ${premenu} ..  ; set premenu ${ThisMenu} 
+item --gap -- -------------------- ${ThisMenu} --------------------
+item  --key d 		DSM_ISCSI_1 						[D]sm_iscsi sanboot   winxp
+item  --key d 		DSM_ISCSI_2 						[D]sm_iscsi sanboot   win7
+item  --key d 		DSM_ISCSI_3 						[D]sm_iscsi sanboot   win10
+goto ButtomMenu
+:Code_End
+
+
+:Code_Begin #  Note ccboot
+
+:ccboot
+#镜像文件要先在ccboot无盘平台中调试好并顺利启动，将ip与ipxe端分配成一致即可接管启动。
+set ThisMenu ccboot
+set menu-default Ccboot_A
+menu ${premenu} --${ThisMenu} --${platform}--${ip}
+item --key 0x5c goTopMenu /  ;  item --key 0x08 ${premenu} ..  ; set premenu ${ThisMenu} 
+item --gap -- -------------------- ${ThisMenu} --------------------
+item  --key c 		Ccboot_A 						[C]cboot  systema
+item  --key c 		Ccboot_B 						[C]cboot  systemb
+item  --key c 		ccboot_newipcfg 					[C]cboot boot from ccboot_gpxe [test]
+goto ButtomMenu
+:Code_End
+
+
+:Code_Begin #  Note win7wim
+
+:win7wim
+#${arch} x86_64 i386 &&
+#${platform} pcbios efi &&
+set root-path ${wim_base_path}/win7_${arch}
+iseq ${arch} x86_64 && 	 set wimbcd ${root-path}/boot/bcd  && \
+						 set wimsdi ${root-path}/boot/boot.sdi && \
+						 set bootwimfile ${root-path}/sources/boot.wim &&\
+						 set wimbootmgr ${root-path}/bootmgr &&\
+						 set wimEFIbootmgr ${root-path}/bootmgr.efi ||
+goto Function_ipxe_Wimboot
+
+:Code_End
+
+:Code_Begin #  Note ljycslg_win10
+
+:ljycslg_win10
+iseq ${platform} efi && set menu-default win64 || set menu-default win32
+#var: kernelfile  Injectedfile  Injected_newname wimbcd wimbcd_newname wimbootmgr wimbootmgr_newname bootwimfile  ||
+set root-path ${wim_base_path}/ljycslg_win10
+set wimsdi ${root-path}/boot/boot.sdi
+set kernelfile ${root-path}/boot/wimboot
+iseq ${platform} pcbios && set wimbcd ${root-path}/boot/bxe && set wimbcd_newname bxd &&\
+						 set wimbootmgr ${root-path}/bootmgr.exe && set wimbootmgr_newname bootmgr.exe &&\
+						 set bootwimfile ${root-path}/boot/pe32.wim &&\
+						 set Injectedfile ${boot_url}/PETools/AutoRuns/pxeautorun.txt && set Injected_newname ${next-server}.cmd ||
+
+iseq ${platform} efi && set wimbcd ${root-path}/boot/bcd &&\
+					 set wimbootmgr ${root-path}/efi/boot/bootx64.efi && set wimbootmgr_newname bootx64.efi &&\
+					 set bootwimfile ${root-path}/boot/pe64.wim ||
+goto Function_ipxe_Wimboot
+:Code_End
+
+
+:Code_Begin #  Note skype
+
+:skype
+set root-path ${wim_base_path}/skype
+set wimbcd ${root-path}/BCD
+set wimsdi ${root-path}/BOOT.SDI
+set bootwimfile ${root-path}/10PEx64.wim
+goto Function_ipxe_Wimboot
+:Code_End
+
+:Code_Begin #  Note efiMemtest
+
+:efiMemtest
+chain ${boot_url}/boot/memtest.bin || goto failed  
+#http://boot.ipxe.org/memtest.bin
+goto start
+:Code_End
+
+:Code_Begin #  Note UEFIpxeClonezilla
+:UEFIpxeClonezilla
+#与bios同一方式
+goto CloneZillabios ||
+:Code_End
+
+:Code_Begin #  Note UEFIpxeAcronisBackup
+:UEFIpxeAcronisBackup
+goto AcronisBackup
+:Code_End
+
+:Code_Begin #  Note UEFIpxeGparted
+
+:UEFIpxeGparted
+imgfree
+chain ${boot_url}/boot/gparted/gparted.efi && boot || 
+goto Gparted_Bios
+:Code_End
+
+:Code_Begin #  Note UEFIghost
+
+:UEFIghost
+imgfree
+chain ${boot_url}/boot/gparted/gparted.efi ghost && boot || goto failed
+:Code_End
+
+:Code_Begin #  Note UEFIghost2
+
+:UEFIghost2
+imgfree
+chain ${boot_url}/boot/ghost/ghost.efi && boot || goto failed
+:Code_End
+
+:Code_Begin #  Note bodosng
+
+:bodosng
+#=#=#=服务器ip最好设置为192.168.1.168#=#=#=#=
+#=#=#=#=# this winimge img file must be win95 win98 img format #=#=#=#=#=
+#=#=#=memdisk参数说明http://www.syslinux.org/wiki/index.php?title=MEMDISK#=#
+#其它grub4dos grub memdisk 尝试启动
+#sanboot --keep --no-describe --drive 0x00 --keep ${filename} || goto failed
+#chain  ${boot_url}/grub4dos/grub.exe  --config-file="map (rd)+1 (0x80);map --hook;chainloader (0x80)" || goto failed
+#chain ${boot_url}/grub.exe  --config-file="map --mem (rd)+1 (hd0);map --hook;chainloader /ntldr" || goto failed
+set imgfilename ${img_base_path}/ipxe_bodostar_ng.img.gz
+#sanboot --keep --no-describe --drive 0x00 ${imgfilename} || goto failed
+goto Function_imgBoot
+#====end :bodosng=====
+:Code_End
+
+:Code_Begin #  Note maxdos9
+
+:maxdos9
+set imgfilename ${img_base_path}/bodosmax9.imz
+goto Function_imgBoot
+:Code_End
+
+:Code_Begin #  Note Diskgenius
+
+:Diskgenius
+set imgfilename ${img_base_path}/DG.IMG
+#goto Function_isoSanBoot
+goto Function_imgBoot
+:Code_End
+
+:Code_Begin #  Note synology_DSM
+
+:synology_DSM
+imgfree || ##  imgstat
+set imgfilename ${img_base_path}/dsm/synoboot1.03b.img
+goto Function_imgBoot
+:Code_End
+
+:Code_Begin #  Note DSM_ISCSI_1
+
+:DSM_ISCSI_1
+:DSM_ISCSI_2
+:DSM_ISCSI_3
+#启动前先用ccboot配置好启动到桌面再交接到ipxe
+#imgfree || ##  imgstat
+clear net0.dhcp/gateway:ipv4
+set initiator-iqn iqn.2005-08.pc1
+set keep-san 1
+
+set netX/gateway 0.0.0.0
+set net0/gateway 0.0.0.0
+set user-class gPXE
+clear username 
+set base_iscsi_port 3260 ||
+#00代表第一启动镜像包，01代表第二启动镜像包
+#prompt --key 0x03 --timeout 2000 Press Ctrl-C to show Variables and continue booting ccboot... && shell || goto shell_echook
+#kernel ${c32_base_path}/cmd.c32
+# iscsi:<servername>:<protocol>:<port>:<LUN>:<TargetNumber>
+iseq ${selected} DSM_ISCSI_1 && set TargetNumber 00 ||
+iseq ${selected} DSM_ISCSI_2 && set TargetNumber 01 ||
+iseq ${selected} DSM_ISCSI_3 && set TargetNumber 02 ||
+sanboot --keep ${base_iscsi}${base_iqn}:${TargetNumber} ||
+set base_iscsi iscsi:${iscsi_server}::${base_iscsi_port}::
+set CustomISCSI ${base_iscsi}${base_iqn}:${TargetNumber} ||
+echo -n Enter CustomISCSI path: ${} && read CustomISCSI ||
+sanboot --keep ${CustomISCSI} ||
+prompt --key 0x03 --timeout 2000 Press Ctrl-C to show Variables and continue boot... || 
+set echoReturnPoint shell_echook && goto Function_StarEcho
+:Code_End
+
+:Code_Begin #  Note Ccboot
+
+:Ccboot_A
+:Ccboot_B
+#启动前先用ccboot配置好启动到桌面再交接到ipxe，ipxe与ccboot端ip保持一致，业务环境配置好ccboot_server ip地址变量
+#00代表第一启动镜像包，01代表第二启动镜像包，以下方式成功启动
+#CCboot用sanboot启动,不要设置username变量
+#imgfree || ##  imgstat
+#set initiator-iqn iqn.2000-01.org.etherboot:PXETEST(0-0)168
+
+isset hostname || set hostname bodostar${Function_GetLastIp} ||
+clear filename && clear username 
+set InitiatorName iqn.2000-01.org.etherboot:${hostname}(00-0)
+set netX/gateway 0.0.0.0
+set net0/gateway 0.0.0.0
+set user-class gPXE
+set ReturnMenuPoint ccbootserveripvalue && set IPin ${ccboot_server} && goto Function_GetLastIp
+:ccbootserveripvalue set base_iqn iqn.2008-12.com.ccboot.${Function_GetLastIp} 
+isset ${ccboot_server} || set ccboot_server ${iscsi_server} ||
+set base_iscsi iscsi:${ccboot_server}::${base_iscsi_port}::
+iseq ${selected} Ccboot_A && set bootLun 00
+iseq ${selected} Ccboot_B && set bootLun 01
+set iscsibootpath iscsi:${ccboot_server}::${base_iscsi_port}::${base_iqn}:${bootLun}
+prompt --key 0x03 --timeout 2000 Press Ctrl-C to Change root-path: ${iscsibootpath} ... && echo -n Enter the new ccboot root-path: ${} && read iscsibootpath ||
+set root-path ${iscsibootpath} && sanboot ${root-path} || goto failed
+#==================================================
+#kernel ${ccboot_tftp_path}/gpxe.pxe
+#initrd ${ccboot_tftp_path}/newip.cfg
+#boot || goto failed
+#==================================================
+:Code_End
+
+:Code_Begin #  Note ccboot_newipcfg
+:ccboot_newipcfg
+#==================================================
+kernel ${ccboot_tftp_path}/gpxe.pxe
+initrd ${ccboot_tftp_path}/newip.cfg
+boot || goto failed
+#==================================================
+:Code_End
+
+:Code_Begin #  Note linkVdisk
+
+:linkVdisk
+#ipxe环境下 bios 挂载的iscsi 在laomaotao下进入win10能出盘
+#set isofilename ${iso_base_path}/vmware/VMware-VMvisor-Installer-6.5.0.update01-5969303.x86_64.iso ||
+set gateway ${next-server}
+set netX/gateway 0.0.0.0
+set net0/gateway 0.0.0.0
+set base_iscsi_port 3260 ||
+set iscsi_server ${next-server} ||
+set target_name NetBootIMG
+set lun_No 1
+set base_iscsi iscsi:${iscsi_server}::${base_iscsi_port}:${lun_No}: ||
+set initiator-iqn ${base_iqn}:${mac:hexhyp} || set initiator-iqn ${base_iqn}:${hostname} ||
+set root-path ${base_iscsi}${base_iqn}:${target_name} && set keep-san 1 ||
+
+#echo -n inpute sanboot to disk: ${} && read root-path ||
+sanhook --drive 0x80 ${root-path} || goto failed
+
+set programe-disk ${base_iscsi}${base_iqn}:NAS-Win-ProgramFiles
+#echo -n inpute sanhook installer source: ${} && read programe-disk ||
+sanhook --drive 0x81 ${programe-disk} || goto failed
+
+set VHDs-disk ${base_iscsi}${base_iqn}:AIOboot
+#echo -n inpute sanhook VHDs: ${} && read VHDs-disk ||
+#sanhook --drive 0xff ${VHDs-disk} && sanboo -n --drive 0xff   ||
+sanboot --no-describe --drive 0xff ${VHDs-disk} ||
+
+set isofilename ${iso_base_path}/LaoMaoTao.iso ||
+echo -n inpute isofilename to boot: ${} && read isofilename ||
+prompt --key 0x03 --timeout 3000 Press Ctrl-C to show Variables and continue boot... && goto shell_echook ||
+goto Function_isoSanBoot ||
+#goto Function_isoMemBoot ||
+#sanhook --drive 0xff ${boot_url}/bodostar.img
+#chain ${SyslinuxMemdisk} ${boot_url}/bodostar.iso iso raw 
+#chain ${SyslinuxMemdisk} ${boot_url}/bodostar.img raw
+#如果想在windows下访问此pxe连接驱动盘,请用SVBus或winvblock或firadisk,将会保留实模式下的驱动号,使其进入保护模式下可读写..一般情况下菜单下要加raw
+exit
+:Code_End
+
+:Code_Begin #  Note android-x86
+
+:android-x86
+set base-url ${boot_url}/boot/iso/android
+set isofilename ${base-url}/android-x86_64-8.1-rc2.iso
+goto Function_isoMemBoot
+:Code_End
+
+:Code_Begin #  Note EasyU_v33
+
+:EasyU_v33
+imgfree || ##  imgstat
+set input_isoame EasyU_v33.iso && set isofilename ${iso_base_path}/${input_isoame} ||
+goto Function_isoSanBoot ||
+:Code_End
+
+:Code_Begin #  Note USBOS
+
+:USBOS
+imgfree || ##  imgstat
+set input_isoame USB.iso && set isofilename ${iso_base_path}/${input_isoame} ||
+goto Function_isoSanBoot ||
+:Code_End
+
+
+
+:Code_Begin #  Note EasyU_wim
+
+:EasyU_wim
+#set bootwimfile ${wim_base_path}/EasyU
+#set root-path ${wim_base_path}/EasyU
+iseq ${arch} x86_64 &&	 set root-path ${wim_base_path}/EasyU && \
+						 set wimEFIbootmgr ${root-path}/EFI/BOOT/BOOTX64.EFI && \
+						 set wimbootmgr ${root-path}/BOOTMGR && \
+						 set wimbcd ${root-path}/BOOT/BCD  && \
+						 set wimsdi ${root-path}/BOOT/BOOT.SDI && \
+						 set bootwimfile ${root-path}/BOOT/10PEx64.wim ||
+iseq ${arch} i386   && set root-path ${boot_url}/boot/wim/winpe && set wimbcd ${root-path}/boot/bcd  && set wimsdi ${root-path}/boot/bcd_WePEX86 && set bootwimfile ${wimbasepath}/sources/WePEX86.WIM ||
+goto Function_ipxe_Wimboot
+
+:Code_End
+
+:kqdUEFI_wim
+#set bootwimfile ${wim_base_path}/kqdUEFI
+#set root-path ${wim_base_path}/kqdUEFI
+iseq ${arch} x86_64 &&	 set root-path ${wim_base_path}/kqdUEFI && \
+						 set wimEFIbootmgr ${root-path}/EFI/BOOT/BOOTX64.EFI && \
+						 set wimbootmgr ${root-path}/BOOTMGR && \
+						 set wimbcd ${root-path}/BOOT/BCD  && \
+						 set wimsdi ${root-path}/BOOT/BOOT.SDI && \
+						 set bootwimfile ${root-path}/IKQD/ikqd.wim ||
+iseq ${arch} i386   && set root-path ${boot_url}/boot/wim/winpe && set wimbcd ${root-path}/boot/bcd  && set wimsdi ${root-path}/boot/bcd_WePEX86 && set bootwimfile ${wimbasepath}/sources/WePEX86.WIM ||
+goto Function_ipxe_Wimboot
+
+:Code_End
+
+:Code_Begin #  Note easyU_PEX64
+
+:easyU_PEX64
+set bootwimfile ${wim_base_path}/wimpe/easyU_PEX64.wim
+goto Function_ipxe_Wimboot
+:Code_End
+
+:Code_Begin #  Note 0pe_WIM
+
+:0pe_WIM
+set bootwimfile ${wim_base_path}/wimpe/0pe0326_WEPE32.WIM
+goto Function_ipxe_Wimboot
+:Code_End
+
+:Code_Begin #  Note thinstation_allmodel
+
+:thinstation_allmodel
+set base-url ${boot_url}/Devstation/boot-images
+set isofilename ${base-url}/iso/thinstation.iso
+goto Function_isoMemBoot
+:Code_End
+
+:Code_Begin #  Note thinstation_rdp
+
+:thinstation_rdp
+imgfree
+#以下成功
+set base-url ${boot_url}/Devstation/boot-images
+set isofilename ${base-url}/iso/thinstation-rdp.iso
+goto Function_isoMemBoot
+
+set base-url ${boot_url}/Devstation/boot-images/pxe
+imgfree || ##  imgstat
+#ipxe  bbs script
+kernel ${base-url}/boot/vmlinuz initrd=${base-url}/boot/thinstation.conf.buildtime splash=on console=ttyS3 load_ramdisk=1 ramdisk_blocksize=4096 root=/dev/ram0 ramdisk_size=786432 vt.global_cursor_default=0
+#kernel ${base-url}/boot/vmlinuz initrd=initrd initrd=thinstation.conf.buildtime splash=off console=ttyS3 load_ramdisk=1 ramdisk_blocksize=4096 root=/dev/ram0 ramdisk_size=786432 vt.global_cursor_default=0
+initrd --name initrd ${base-url}/boot/initrd splash=silent,theme:default load_ramdisk=1 ramdisk_blocksize=4096 root=/dev/ram0 ramdisk_size=786432 console=tty1 vt.global_cursor_default=0 quiet loglevel=3 LM=3
+imgstat
+read void
+boot
+#my script
+kernel ${base-url}/boot/vmlinuz
+initrd ${base-url}/boot/initrd splash=silent,theme:default load_ramdisk=1 ramdisk_blocksize=4096 root=/dev/ram0 ramdisk_size=786432 console=tty1 vt.global_cursor_default=0 quiet loglevel=3 LM=3
+read void
+boot || goto failed
+
+set 209:string ${base-url}\boot\syslinux\syslinux.cfg
+set 210:string ${base-url}\boot
+initrd ${base-url}/boot/syslinux/ldlinux.c32
+chain ${base-url}\boot/syslinux/syslinux 
+boot || goto failed
+:Code_End
+
+:Code_Begin #  Note 2XOS
+
+:2XOS
+set base-url ${boot_url}/TCSclientOS
+#set 210:string ${boot_url}/TCSclientOS/
+#chain ${210:string}pxe/pxelinux.0 initrd ${210:string}pxe/pxelinux.cfg/default || goto failed
+#kernel ${base-url}/pxe/linux
+#initrd ${base-url}/rootdisk.img ro
+#imgargs linux quiet console=tty2 splash bootm=pxe man=tux model=generic_r3 boot_OPT_START acpi  boot_OPT_END
+set isofilename ${iso_base_path}/TCSclientOS-generic.r3.iso
+goto Function_isoMemBoot
+:Code_End
+
+:Code_Begin #  Note tinycorlinux
+
+:tinycorlinux
+set base-url ${boot_url}/boot/tinycorlinux
+#kernel ${base-url}/boot/vmlinuz 
+#initrd ${base-url}/boot/core.gz
+#imgargs vmlinuz loglevel=3 cde
+#boot || goto failed
+set isofilename ${iso_base_path}/tinycore/TinyCore-current.iso
+goto Function_isoMemBoot
+:Code_End
+
+:Code_Begin #  Note sanbootCustomISO
+
+:sanbootCustomISO
+imgfree || ##  imgstat
+set input_isoame LaoMaoTao.iso
+#set input_isoame .iso
+echo -n input_isoame the path is /boot/iso/(etc xxx/xxx.iso): ${} && read input_isoame
+set isofilename ${iso_base_path}/${input_isoame} ||
+#prompt isofilename: ${isofilename} ||
+#sanhook --drive 0x9F ${isofilename}
+goto Function_isoSanBoot ||
+:Code_End
+
+:Code_Begin #  Note Function_imgBootCustomIMG
+
+:Function_imgBootCustomIMG
+set input_imgame .img
+echo -n input_imgame the path is /boot/img/(etc xxx/xxx.img /ima/gz): ${} && read input_imgame
+set imgfilename ${img_base_path}/${input_imgame} ||
+goto Function_imgBoot
+:Code_End
+
+:Code_Begin #  Note sanbootCustomISCSI
+
+:sanbootCustomISCSI
+
+set netX/gateway 0.0.0.0
+set user-class gPXE
+clear username 
+set target_No 00 ||
+#00代表第一启动镜像包，01代表第二启动镜像包
+#prompt --key 0x03 --timeout 2000 Press Ctrl-C to show Variables and continue booting ccboot... && shell || goto shell_echook
+#kernel ${c32_base_path}/cmd.c32
+# iscsi:<iscsiServername>:<protocol>:<port>:<LUN>:<TargetNumber>
+# set initiator-iqn ${base_iqn}:00 || set initiator-iqn ${base_iqn}:01
+echo iscsi fromat: iscsi:(<servername>:<protocol>:<port>:<LUN>:<target_name>) ||
+echo target_name format: iqn.<date_code>.<reversed_domain>.<string>[:<substring>] ||
+set base_iscsi iscsi:${iscsi_server}::${base_iscsi_port}:: ||
+set root-path ${base_iscsi}${base_iqn}:${target_No} ||
+echo -n Enter CustomISCSI path: ${} && read root-path ||
+sanboot --keep ${root-path} ||
+prompt --key 0x03 --timeout 2000 Press Ctrl-C to show Variables and continue boot... || goto shell_echook
+set echoReturnPoint shell_echook && goto Function_StarEcho
+:Code_End
+
+:Code_Begin #  Note autoInstallESXi
+
+:autoInstallESXi
+#iso pxelinux官方启动脚本，注意将boot.cfg中的 “/”去掉 并更改路径
+#  prefix=boot/ESXi/6.7/
+#  kernelopt=boot/ESXi/6.7/ks.cfg
+##   编译ipxe.pxe时，source/config/local/general.h   
+##  #define IMAGE_COMBOOT
+imgfree
+set root-path ${boot_url}/boot/ESXi/6.7 ||
+set base_iscsi iscsi:${iscsi_server}::${base_iscsi_port}:: ||
+#sanhook --drive 0x81 ${base_iscsi}${base_iqn}:ESXi67 ||
+sanboot --keep --no-describe ${base_iscsi}${base_iqn}:ESXi67installer ||
+kernel ${root-path}/MBOOT.C32 -c ${root-path}/BOOT.CFG ks=${root-path}/ks.cfg ||
+#imgstat ||
+#prompt --key 0x03 --timeout 3000 Press Ctrl-C to show Variables and continue boot... && goto shell_echook ||
+boot
+:Code_End
+
+:Code_Begin #  Note biosESXi
+
+:biosESXi
+##安装目前只限于非efi环境 20190715
+imgfree && set keep-san 0 && sanunhook || ##  imgstat
+#set isofilename ${iso_base_path}/vmware/VMware-VMvisor-Installer-6.5.0.update01-5969303.x86_64.iso ||
+set gateway ${next-server}
+set base_iscsi_port 3260 ||
+set iscsi_server ${next-server} ||
+set target_name ESXi
+set lun_No 1
+set base_iscsi iscsi:${iscsi_server}::${base_iscsi_port}:${lun_No}: ||
+#set initiator-iqn ${base_iqn}:${mac:hexhyp} || set initiator-iqn ${base_iqn}:${hostname} ||
+set initiator-iqn ${base_iqn}:ESXi7-Giga-z77-hd3 ||
+#set root-path ${base_iscsi}${base_iqn}:${target_name} && set keep-san 1 ||
+set root-path ${base_iscsi}${base_iqn}:ESXi7 && set keep-san 1 ||
+echo -n inpute sanhook to install ${} && read root-path ||
+sanhook ${root-path} || goto failed
+#set isofilename ${iso_base_path}/vmware/VMware-VMvisor-Installer-6.7.0.update02-13006603.x86_64.iso ||
+#set isofilename ${iso_base_path}/vmware/VMware_ESXi_7.0.0_15843807_HPE_700.0.0.10.5.0.108_April2020.iso ||
+#set isofilename ${iso_base_path}/vmware/VMware-VMvisor-Installer-7.0.0-15843807.x86_64-DellEMC_Customized-A00.iso ||
+#set isofilename ${iso_base_path}/vmware/VMware-VMvisor-Installer-7.0.0-14896552.x86_64.iso ||
+# set isofilename ${iso_base_path}/vmware/VMware-VMvisor-Installer-7.0b-16324942.x86_64.iso ||
+set isofilename ${iso_base_path}/vmware/ESXi-7.x-Custom.iso
+prompt --key 0x03 --timeout 3000 Press Ctrl-C to show Variables and continue boot... && goto shell_echook ||
+#64bit efi boot
+#iseq ${arch} x86_64 && goto Function_isoSanBoot ||
+#32bit x86 bios boot
+goto Function_isoMemBoot ||
+
+:Code_End
+
+:Code_Begin #  Note CloneZillabios
+
+:CloneZillabios
+imgfree || 
+##  imgstat
+#get iscsi path 进入后并不能识别出来 测试ing
+set root-path ${base_iscsi}${base_iqn}:BackupTarget ||
+echo -n inpute sanhook to install ${} && read root-path ||
+sanhook ${root-path} ||
+#httpboot
+
+#set root-path ${boot_url}/boot/clonezilla/clonezilla64-2018
+#imgselect ${boot_url}/boot/clonezilla/clonezilla64/live/vmlinuz
+#imgfetch ${boot_url}/boot/clonezilla/clonezilla64/live/initrd.img
+#imgfetch ${boot_url}/boot/clonezilla/clonezilla64/live/filesystem.squashfs
+
+
+iseq ${arch} x86_64 && set root-path ${boot_url}/boot/clonezilla/clonezilla_amd64 ||
+iseq ${arch} i386   && set root-path ${boot_url}/boot/clonezilla/clonezilla_i386 ||
+imgselect ${root-path}/live/vmlinuz
+imgfetch  ${root-path}/live/initrd.img
+imgargs vmlinuz initrd=initrd.img vga=791 boot=live union=overlay components net.ifnames=0 noprompt edd=on nomodeset nosplash username=user config  locales=zh_CN.UTF-8 keyboard-layouts=en timezone=Asia/Shanghai i915.blacklist=yes radeonhd.blacklist=yes nouveau.blacklist=yes vmwgfx.blacklist=yes live-netdev="eth0" fetch=${root-path}/live/filesystem.squashfs  ocs_prerun="" ocs_live_run="" ocs_live_batch="no"
+imgstat ||
+prompt --key 0x03 --timeout 3000 Press Ctrl-C to show Variables and continue boot... && goto shell_echook ||
+boot || read void ||
+
+#nfsboot 待解决中文字符问题
+set nfspxepath ${next-server}:/volume2/pxe/
+#set nfspxepath ${next-server}:/volume1/bodostarProgramfiles/各类软件/网络软件/英保通服务/Tools/pxe/
+kernel ${boot_url}/boot/clonezilla/clonezilla64/live/vmlinuz initrd=initrd.img vga=791 boot=live union=overlay components net.ifnames=0 noprompt edd=on nomodeset nosplash username=user config  locales=zh_CN.UTF-8 keyboard-layouts=en timezone=Asia/Shanghai i915.blacklist=yes radeonhd.blacklist=yes nouveau.blacklist=yes vmwgfx.blacklist=yes live-netdev="eth0" netboot=nfs nfsroot=${nfspxepath}boot/clonezilla/clonezilla64 ocs_prerun="" ocs_live_run="" ocs_live_batch="no"
+initrd ${boot_url}/boot/clonezilla/clonezilla64/live/initrd.img
+imgstat ||
+prompt --key 0x03 --timeout 3000 Press Ctrl-C to show TO SHELL... && goto shell_echook ||
+boot || read void
+
+#isoboot
+#set isofilename ${iso_base_path}/clonezilla/clonezilla-live-20180329-artful-amd64.iso ||
+iseq ${arch} x86_64 && set isofilename ${iso_base_path}/clonezilla/clonezilla-live-20190420-disco-amd64.iso ||
+iseq ${arch} i386   && set isofilename ${iso_base_path}/clonezilla/clonezilla-live-20190420-disco-i386.iso ||
+
+goto Function_isoSanBoot ||
+#testing...
+kernel ${boot_url}/boot/clonezilla/vmlinuz ||
+imgfetch ${boot_url}/boot/clonezilla/initrd.img ||
+imgfetch ${boot_url}/boot/clonezilla/filesystem.squashfs ||
+imgargs "append boot=live username=user union=overlay config components quiet noswap edd=on nomodeset nodmraid ocs_live_batch=no net.ifnames=0 nosplash noprompt fetch=${base-url}/filesystem.squashfs" ||
+prompt
+boot || goto failed
+#set isofilename ${iso_base_path}/clonezilla/clonezilla-live-20180329-artful-i386.iso ||
+set isofilename ${iso_base_path}/clonezilla/clonezilla-live-2.5.5-38-i686.iso ||
+goto Function_isoSanBoot ||
+goto Function_isoMemBoot ||
+kernel ${base-url}/boot/clonezilla/vmlinuz append initrd=${base-url}/boot/clonezilla/initrd.img boot=live username=user union=overlay config components quiet noswap edd=on nomodeset nodmraid locales= keyboard-layouts= ocs_live_run="ocs-live-general" ocs_live_extra_param="" ocs_live_batch=no net.ifnames=0 nosplash noprompt fetch=${base-url}/boot/clonezilla/filesystem.squashfs ||
+boot
+:Code_End
+
+:Code_Begin #  Note thinstation2018
+
+:thinstation2018
+iseq ${arch} x86_64 && set PC_platform amd64 ||
+iseq ${arch} i386 && set PC_platform i686 ||
+set root-path ${boot_url}/Devstation/Devstation2018/pxe/boot ||
+#KERNEL ${root-path}/vmlinuz ||
+initrd ${root-path}/initrd ||
+kernel ${root-path}/vmlinuz ||
+#imgfetch ${root-path}/lib.squash ||
+imgargs vmlinuz initrd=${root-path}/initrd splash=off console=tty1 vt.global_cursor_default=0 quiet loglevel=3  LM=3 fetch=${root-path}/lib.squash ||
+imgstat ||
+prompt --key 0x03 --timeout 3000 Press Ctrl-C to show Variables and continue boot... && goto shell_echook ||
+boot || read void ||
+
+###try iso boot
+set isofilename ${boot_url}/Devstation/Devstation2018/iso/thinstation.iso ||
+goto Function_isoSanBoot ||
+:Code_End
+
+:Code_Begin #  Note Gparted_Bios
+
+:Gparted_Bios
+#iseq ${platform} efi && set PC_platform amd64 || set PC_platform i686 ||
+# 0.28 # iseq ${arch} x86_64 && chain ${boot_url}/boot/gparted/gparted.efi ||
+iseq ${arch} x86_64 && set PC_platform amd64 ||
+iseq ${arch} i386 && set PC_platform i686 ||
+set root-path ${boot_url}/boot/gparted/${PC_platform} ||
+imgselect ${boot_url}/boot/gparted/${PC_platform}/vmlinuz ||
+imgfetch ${boot_url}/boot/gparted/${PC_platform}/initrd.img ||
+#imgfetch ${boot_url}/boot/clonezilla/clonezilla64/live/filesystem.squashfs
+imgargs vmlinuz initrd=initrd.img vga=791 boot=live  config components union=overlay username=user noswap noeject ip= vga=788 fetch=${root-path}/filesystem.squashfs
+imgstat ||
+prompt --key 0x03 --timeout 3000 Press Ctrl-C to show Variables and continue boot... && goto shell_echook ||
+boot || read void ||
+###try iso boot
+set isofilename ${iso_base_path}/gparted/gparted-live-0.32.0-1-${PC_platform}.iso ||
+goto Function_isoSanBoot ||
+#官方pxe启动菜单脚本
+##kernel ${boot_url}/boot/gparted/vmlinuz
+##imgargs "append initrd=${boot_url}/boot/gparted/initrd.img boot=live config components union=overlay username=user noswap noeject ip= vga=788 fetch=${boot_url}/boot/gparted/filesystem.squashfs"
+:Code_End
+
+:Code_Begin #  Note bt5
+
+:bt5
+#sanboot --keep --drive 0x81 ${iso_base_path}/bt5.iso || goto failed
+#sanboot --keep --no-describe --drive 0xff ${boot_url}/0pe.iso || goto failed
+boot || goto failed
+:Code_End
+
+:Code_Begin #  Note AcronisBackup
+
+:AcronisBackup
+###try iso boot
+set isofilename ${iso_base_path}/AcronisBackup/AcronisBackupAdvancedUniversal_11.7_44421_en-US.iso ||
+goto Function_isoSanBoot ||
+:Code_End
+
+:Code_Begin #  Note yjhy_a
+
+:yjhy_a
+###try iso boot
+set isofilename ${iso_base_path}/BackupRestoreSystem/yjhy_a.iso ||
+goto Function_isoSanBoot ||
+:Code_End
+
+
+:Code_Begin #  Note 0PE20180808
+
+:0PE20180808
+set isofilename ${iso_base_path}/0PE/0PE.ISO
+iseq ${platform} efi && goto Function_isoSanBoot ||
+iseq ${platform} pcbios && goto Function_Grub4dos_Map_Chainloader ||
+:Code_End
+
+:Code_Begin #  Note NET0PE20180808
+:NET0PE20180808
+set isofilename ${iso_base_path}/0PE/NET0PE.ISO
+iseq ${platform} efi && goto Function_isoSanBoot ||
+iseq ${platform} pcbios && goto Function_Grub4dos_Map_Chainloader ||
+
+:Code_End
+
+:Code_Begin #  Note Function_Grub4dos_Map_Chainloader
+:Function_Grub4dos_Map_Chainloader
+#goto try2
+imgfree
+set filename /0PE/grub.exe #grub4dos环境是取filename中的路径作为basedir,不带任何路径的文字代表根目录 即 set basedir / 
+set net0/filename /0PE/grub.exe
+set net0.dhcp/filename /0PE/grub.exe
+kernel ${grub4dos_path}/grub.exe --config-file="map (rd)+1 (0xff);map --hook; rootnoverify (0xff);chainloader (0xff);" 
+initrd ${isofilename} ||
+boot
+
+:try2
+set filename /0PE/grldr #grub4dos环境是取filename中的路径作为basedir,不带任何路径的文字代表根目录 即 set basedir / 
+set net0/filename /0PE/grldr
+set net0.dhcp/filename /0PE/grldr
+set SVR 192.168.001.008
+prompt --key 0x02 --timeout 5000  ${boot_url}/0PE/grldr end set var Press Ctrl-B for the iPXE shell. && shell ||
+kernel ${boot_url}${filename} iso raw initrd=${boot_url}${filename} || goto failed
+boot
+:Code_End
+
+:Code_Begin #  Note memdisk0pe
+
+:memdisk0pe
+set isofilename ${iso_base_path}/0PE/0PE.ISO
+set isofilename ${iso_base_path}/0PE/NET0PE.ISO
+goto Function_isoMemBoot
+#chain  ${SyslinuxMemdisk} iso raw || goto failed
+:Code_End
+
+
+:Code_Begin #  Note bodospxe
+
+:bodospxe
+imgfree || ##  imgstat
+chain ${boot_url}/bodos.pxe  || goto failed
+#kernel ${boot_url}/bodos.pxe  || goto failed
+#boot || goto failed
+# ipxe sanboot --keep options for booting 7PE iso from Network - working OK
+:Code_End
+
+:Code_Begin #  Note vhd_xp
+
+:vhd_xp
+#set vhdfilename ${vhd_base_path}/${selected}.vhd
+#set vhdfilename ${vhd_base_path}/ccootpnpxp.vhd
+set vhdfilename ${vhd_base_path}/mini.vhd
+#vhd mini boot 可以启动，常规系统超2g大小vhd尚未成功,最好的方法是用ccboot交接
+goto Function_vhdBoot
+sanboot --keep --no-describe ${vhdfilename}
+goto ${platformStart}  
+:Code_End
+
+:Code_Begin #  Note vhd_w7
+
+:vhd_w7
+sanboot --keep --no-describe ${boot_url}/Win7-1.vhd || goto failed 
+:Code_End
+
+:Code_Begin #  Note vhd_w8
+
+:vhd_w8
+sanboot --keep --no-describe ${boot_url}/Win8-1.vhd || goto failed 
+:Code_End
+
+:Code_Begin #  Note freedos
+
+:freedos
+echo Booting FreeDOS from iSCSI 
+set root-path ${base_iscsi}${base_iqn}:freedos
+sanboot --keep ${root-path} || goto failed
+:Code_End
+
+:Code_Begin #  Note msdos
+
+:msdos
+echo Booting MS-DOS from iSCSI 
+set root-path ${base_iscsi}${base_iqn}:msdos
+sanboot --keep ${root-path} || goto failed
+:Code_End
+
+:Code_Begin #  Note ubuntu
+
+:ubuntu
+echo Booting Ubuntu from iSCSI 
+set root-path ${base_iscsi}${base_iqn}:ubuntu
+sanboot --keep ${root-path} || goto failed
+:Code_End
+
+:Code_Begin #  Note vmware-esxi-iscsiboot
+
+:vmware-esxi-iscsiboot
+imgfree || ##  imgstat
+#sanunhook ||
+echo Booting VMware ESXi from iSCSI 
+set root-path ${base_iscsi}${base_iqn}:ESXi-Giga-z77-hd3 && set keep-san 1 ||
+sanboot -n ${root-path} || goto failed
+# done
+sanhook ${base_iscsi}${base_iqn}:${mac:hexhyp} \
+        ${base_iscsi}${base_iqn}:ESXi ||
+#prompt --key 0x03 --timeout 2000 Press Ctrl-C to show Variables and continue boot... && goto shell_echook
+sanboot --keep ${root-path} || goto failed
+goto ${platformStart} 
+:Code_End
+
+:vmware-esxi7-iscsiboot
+imgfree || ##  imgstat
+#sanunhook ||
+echo Booting VMware ESXi from iSCSI 
+set root-path ${base_iscsi}${base_iqn}:ESXi7-Giga-z77-hd3 && set keep-san 1 ||
+sanboot -n ${root-path} || goto failed
+# done
+sanhook ${base_iscsi}${base_iqn}:${mac:hexhyp} \
+        ${base_iscsi}${base_iqn}:ESXi ||
+#prompt --key 0x03 --timeout 2000 Press Ctrl-C to show Variables and continue boot... && goto shell_echook
+sanboot --keep ${root-path} || goto failed
+goto ${platformStart} 
+:Code_End
+
+:Code_Begin #  Note vmware-view
+
+:vmware-view
+imgfree || ##  imgstat
+set iso-url ${iso_base_path}/vmware/LiveCD.vmview.iso
+sanboot --keep --no-describe --drive 0x81 ${iso-url} || goto failed
+#initrd ${iso-url}
+#chain ${SyslinuxMemdisk} iso raw || goto failed
+:Code_End
+
+:Code_Begin #  Note windows7
+
+:windows7
+echo Booting Windows 7 from iSCSI 
+set root-path ${base_iscsi}${base_iqn}:windows7
+sanboot --keep ${root-path} || goto failed
+:Code_End
+
+:Code_Begin #  Note spinrite
+
+
+:spinrite
+sanboot --keep --no-describe --drive 0x00 ${boot_url}/spinrite-6.0/spinrite-6.0.img || goto failed
+#sanboot --keep --no-describe --drive 0x081 ${boot_url}/spinrite-6.0/spinrite-6.0.iso
+#initrd ${boot_url}/spinrite/spinrite-6.0.img
+#chain ${SyslinuxMemdisk}
+goto ${platformStart} 
+:Code_End
+
+:Code_Begin #  Note spinrite-msdos 
+
+:spinrite-msdos 
+sanboot --keep --no-describe --drive 0x00 ${boot_url}/spinrite-6.0/spinrite-6.0-msdos.img || goto failed
+:Code_End
+
+:Code_Begin #  Note sysrcd
+
+:sysrcd
+echo Booting SystemRescueCD 2.6.0 i386 
+# Fixup needed after copying files from downloaded iso to directory:
+#  cd path/to/sysrcd-iso-unpacked-files/isolinux && /
+#   perl -p -i -e 's{/bootdisk}{../bootdisk}' isolinux.cfg && /
+#   perl -p -i -e 's{scandelay=1}{scandelay=1 dodhcp nfsboot=nas.smidsrod.lan:/raid/boot/sysrcd-2.6.0-x86}' isolinux.cfg && /
+#   perl -p -i -e 's{rescuecd_us}{rescuecd_no}; s{US}{NO}; s{setkmap=us}{setkmap=no}; s{american}{norwegian};' isolinux.cfg && /
+#   cd -
+# PXELinux options, see http://syslinux.zytor.com/wiki/index.php/PXELINUX for details
+set 210:string ${boot_url}/sysrcd-2.6.0-x86/isolinux/
+set 209:string isolinux.cfg
+set filename ${boot_url}/PXELinux/pxelinux.0
+chain ${filename} || goto failed
+:Code_End
+
+:Code_Begin #  Note macrium-winpe
+
+:macrium-winpe
+sanboot --keep --no-describe ${winpe_base_path}/macrium-5.0/macrium-5.0-rescue-winpe-3.1.iso || goto failed
+:Code_End
+
+:Code_Begin #  Note macrium-linux
+
+:macrium-linux
+sanboot --keep --no-describe ${winpe_base_path}/macrium-5.0/macrium-5.0-rescue-linux.iso || goto failed
+:Code_End
+
+:Code_Begin #  Note macrium-wimboot
+
+:macrium-wimboot
+echo Booting Macrium Reflect 5.0 (WinPE 3.1) 
+set bootwimfile ${winpe_base_path}/macrium-5.0/wimboot/boot.WIM
+goto Function_ipxe_Wimboot
+:Code_End
+
+:Code_Begin #  Note hdt
+
+:hdt
+kernel ${c32_base_path}/hdt.c32 ||
+boot ||
+sanboot --keep --no-describe ${iso_base_path}/hdt-0.5.0.iso || goto failed
+:Code_End
+
+:Code_Begin #  Note memtest
+
+:memtest
+#chain ${img_base_path}/hardtools/MEMTEST.IMG || goto failed
+sanboot --keep --no-describe --drive 0x00 ${img_base_path}/hardtools/MEMTEST.IMG || 
+initrd ${img_base_path}/hardtools/MEMTEST.IMG || 
+chain ${SyslinuxMemdisk} || goto failed
+:Code_End
+
+:Code_Begin #  Note memtestnbp
+
+:memtestnbp
+chain ${boot_url}/boot/memtest passes=1 && set memtest GOOD || set memtest BAD
+set memtest_errno ${errno}
+iseq ${memtest} GOOD && goto memtest-report ||
+iseq ${memtest_errno} 0x1 && set memtest BAD || set memtest UNKNOWN
+:Code_End
+
+:Code_Begin #  Note memtest-report
+
+:memtest-report
+chain ${boot_url}/memtest-report.cgi?result=${memtest}&mac=${mac}&uuid=${uuid}&hostname=${hostname} || goto failed
+goto mem_diag
+:Code_End
+
+:Code_Begin #  Note breakin
+
+:breakin
+# Stress-testing and diagnostics utility
+# http://www.advancedclustering.com/software/breakin.html
+# Set sshpasswd=yourpassword for remote access
+# Set startup= to 'cloner' or 'rescue' for more features
+# When startup=cloner, server= and image= can also be set
+# http://www.advancedclustering.com/software/cloner.html
+kernel ${boot_url}/breakin-3.71/kernel-3.71 || goto failed
+initrd ${boot_url}/breakin-3.71/initrd-3.71.cpio.lzma || goto failed
+imgargs kernel-3.71 startup=breakin || goto failed
+boot || goto failed
+:Code_End
+
+:Code_Begin #  Note dban
+
+:dban
+sanboot --keep --no-describe ${boot_url}/dban-2.2.6-i586.iso || goto failed
+:Code_End
+
+:Code_Begin #  Note etdump
+
+:etdump
+# Booting it with memdisk makes it read/write, while sanboot --keep forces read/only
+#sanboot --keep --drive 0x00 ${boot_url}/freedos-etdump-floppy.img || goto failed
+initrd ${boot_url}/freedos-etdump-floppy.img || goto failed
+chain ${SyslinuxMemdisk} || goto failed || goto failed
+:Code_End
+
+:Code_Begin #  Note wdcdiag
+
+:wdcdiag
+# Extracted the bootable floppy image from diag-5.04f.iso
+sanboot --keep --drive 0x00 ${boot_url}/western-digital/diag-5.04f.img || goto failed
+:Code_End
+
+:Code_Begin #  Note menu-geexbox
+
+:menu-geexbox
+menu  GeeXboX
+item  --key s 		Start_GeeXboX [S]tart_geexbox ... ||
+item  --key i 		install_GeeXboX  [I]nstall geexbox to disk ... ||
+item  --key s 		debug_GeeXboX [S]tart in debugging mode ... ||
+#item configure GeeXboX
+#CFG#  MENU LABEL (Re)configure a GeeXboX installation ...
+#CFG#  KERNEL /vmlinuz
+#CFG#  APPEND initrd=/initrd  quiet loglevel=3 configure
+:Code_End
+
+:Code_Begin #  Note Start_GeeXboX  
+
+:Start_GeeXboX  
+KERNEL ${img_base_path}/影音娱乐/geexbox/vmlinuz
+append ${img_base_path}/影音娱乐/geexbox/rootfs
+APPEND initrd=${img_base_path}/影音娱乐/geexbox/initrd  vga=789 persistent quiet splash loglevel=3
+boot || goto failed
+:Code_End
+
+:Code_Begin #  Note install_GeeXboX
+
+:install_GeeXboX
+KERNEL ${img_base_path}/影音娱乐/geexbox/vmlinuz
+append ${img_base_path}/影音娱乐/geexbox/rootfs
+APPEND initrd=${img_base_path}/影音娱乐/geexbox/initrd  quiet loglevel=3 nocache systemd.unit=installator.target
+boot || goto failed
+:Code_End
+
+:Code_Begin #  Note debug_GeeXboX
+
+:debug_GeeXboX
+KERNEL ${img_base_path}/影音娱乐/geexbox/vmlinuz
+append ${img_base_path}/影音娱乐/geexbox/rootfs
+APPEND initrd=${img_base_path}/影音娱乐/geexbox/initrd  emergency
+boot || goto failed
+:Code_End
+
+:Code_Begin #  Note freedos-install
+
+:freedos-install
+echo Booting FreeDOS 1.1 installer to iSCSI 
+set root-path ${base_iscsi}${base_iqn}:freedos
+sanhook ${root-path} || goto failed
+sanboot --keep --drive 0x81 ${boot_url}/freedos-1.1/fd11src.iso || goto failed
+:Code_End
+
+:Code_Begin #  Note msdos-install
+
+:msdos-install
+echo Booting MS-DOS 6.22 installer to iSCSI 
+set root-path ${base_iscsi}${base_iqn}:msdos
+sanhook ${root-path} || goto failed
+sanboot --keep --no-describe --drive 0x00 ${boot_url}/msdos-6.22/disk1.img || goto failed
+:Code_End
+
+:Code_Begin #  Note ubuntu-install-amd64
+
+:ubuntu-install-amd64
+echo Starting Ubuntu 12.04 amd64 installer 
+# Hook iSCSI drive
+set root-path ${base_iscsi}${base_iqn}:ubuntu
+#sanhook ${root-path} || goto failed
+# Start ubuntu-installer. Remember that the iSCSI target must be writable
+# by anyone, as debian-installer generates a randomized initiator-iqn in
+# /etc/iscsi/initiatorname.iscsi
+# The preseed script used takes care of rewriting it to the
+# hostname-based IQN used in this script.
+# This kernel param which open-iscsi README.Debian mentions doesn't work
+# inside debian-installer, unfortunately: iscsi_initiator=${initiator-iqn}
+# Hard workaround available here:
+# http://umfcloudpilot.eduserv.org.uk/entries/20299686-enable-pre-seed-or-kickstart-seeding-of-iscsi-intiator-iqn-in-ubuntu-server
+set base-url ${boot_url}/ubuntu-12.04-server-amd64
+kernel ${base-url}/install/netboot/ubuntu-installer/amd64/linux initrd=initrd.gz || goto failed
+initrd ${base-url}/install/netboot/ubuntu-installer/amd64/initrd.gz || goto failed
+imgargs linux auto=true fb=false url=${base-url}/./preseed.cfg DEBCONF_DEBUG=5 netcfg/get_hostname=${hostname} partman-iscsi/login/address=10.1.1.10 partman-iscsi/login/targets=${base_iqn}:${hostname}.boot.ubuntu partman-iscsi/login/username=${username} partman-iscsi/login/password=${password}
+boot || goto failed
+:Code_End
+
+:Code_Begin #  Note ubuntu-install-i386
+
+:ubuntu-install-i386
+echo Starting Ubuntu 12.04 i386 installer 
+# Hook iSCSI drive
+set root-path ${base_iscsi}${base_iqn}:ubuntu
+sanhook ${root-path} || goto failed
+# Start ubuntu-installer. Remember that the iSCSI target must be writable
+# by anyone, as debian-installer generates a randomized initiator-iqn in
+# /etc/iscsi/initiatorname.iscsi
+# The preseed script used takes care of rewriting it to the
+# hostname-based IQN used in this script.
+# This kernel param which open-iscsi README.Debian mentions doesn't work
+# inside debian-installer, unfortunately: iscsi_initiator=${initiator-iqn}
+# Hard workaround available here:
+# http://umfcloudpilot.eduserv.org.uk/entries/20299686-enable-pre-seed-or-kickstart-seeding-of-iscsi-intiator-iqn-in-ubuntu-server
+set base-url ${boot_url}/ubuntu-12.04-server-i386
+kernel ${base-url}/install/netboot/ubuntu-installer/i386/linux || goto failed
+initrd ${base-url}/install/netboot/ubuntu-installer/i386/initrd.gz || goto failed
+imgargs linux auto=true fb=false url=${base-url}/./preseed.cfg DEBCONF_DEBUG=5 netcfg/get_hostname=${hostname} partman-iscsi/login/address=10.1.1.10 partman-iscsi/login/targets=${base_iqn}:${hostname}.boot.ubuntu partman-iscsi/login/username=${username} partman-iscsi/login/password=${password} || goto failed
+boot || goto failed
+:Code_End
+
+:Code_Begin #  Note ubuntu-install-amd64-local
+
+:ubuntu-install-amd64-local
+echo Starting Ubuntu 12.04 amd64 local installer 
+set base-url ${boot_url}/ubuntu-12.04-server-amd64
+kernel ${base-url}/install/netboot/ubuntu-installer/amd64/linux || goto failed
+initrd ${base-url}/install/netboot/ubuntu-installer/amd64/initrd.gz || goto failed
+imgargs linux auto=true fb=false url=${base-url}/./preseed.cfg
+boot || goto failed
+:Code_End
+
+:Code_Begin #  Note ubuntu-install-i386-local
+
+:ubuntu-install-i386-local
+echo Starting Ubuntu 12.04 i386 local installer 
+set base-url ${boot_url}/ubuntu-12.04-server-i386
+kernel ${base-url}/install/netboot/ubuntu-installer/i386/linux || goto failed
+initrd ${base-url}/install/netboot/ubuntu-installer/i386/initrd.gz || goto failed
+imgargs linux auto=true fb=false url=${base-url}/./preseed.cfg
+boot || goto failed
+:Code_End
+
+:Code_Begin #  Note windows7-install
+
+:windows7-install
+set netX/gateway 0.0.0.0
+set net0/gateway 0.0.0.0
+
+echo Starting Windows 7  ${arch} installer 
+# Hook iSCSI drive
+set root-path ${base_iscsi}${base_iqn}:windows7
+set netX/gateway ${iscsi-server}
+sanhook ${root-path} || goto failed
+# Start Windows 7 installer DVD
+sanboot --keep --no-describe --drive 0x81 ${boot_url}/windows-7/ultimate-${arch}.iso || goto failed
+# Better solution, according to Oliver Rath on the mailing-list
+# Requires massive amounts of RAM, though
+#initrd ${boot_url}/windows-7/ultimate-x64.iso
+#chain ${SyslinuxMemdisk} iso raw || goto failed
+:Code_End
+
+:Code_Begin #  Note winpe-wimboot
+
+:winpe-wimboot
+echo Booting Windows PE x64 installer 
+#echo (for installing Windows 7)
+set root-path ${base_iscsi}${base_iqn}:windows7
+sanhook ${root-path} || goto failed
+:Code_End
+
+
+:Code_Begin #  Note ubuntu-installer-amd64-remote
+
+:ubuntu-installer-amd64-remote
+echo Starting Ubuntu 12.04 amd64 installer 
+set base-url http://no.archive.ubuntu.com/ubuntu/dists/precise/main/installer-amd64/current/images/netboot/ubuntu-installer/amd64
+kernel ${base-url}/linux
+initrd ${base-url}/initrd.gz
+#imgargs linux auto=true url=http://yourserver/some/path/preseed.cfg
+boot || goto failed
+:Code_End
+
+:Code_Begin #  Note ubuntu-installer-i386-remote
+
+:ubuntu-installer-i386-remote
+echo Starting Ubuntu 12.04 i386 installer 
+set base-url http://no.archive.ubuntu.com/ubuntu/dists/precise/main/installer-i386/current/images/netboot/ubuntu-installer/i386
+kernel ${base-url}/linux
+initrd ${base-url}/initrd.gz
+#imgargs linux auto=true url=http://yourserver/some/path/preseed.cfg
+boot || goto failed
+:Code_End
+
+:Code_Begin #  Note xenclient-install
+
+:xenclient-install
+echo Booting XenClient 2.1 installer 
+# XenClient doesn't seem to support installing to iSCSI volumes
+# It only supports installing using iBFT
+#set root-path ${base_iscsi}${base_iqn}:xenclient
+#sanhook ${root-path} || goto failed
+# The xenclient-2.1 folder is just the unpacked contents of the installer iso
+# Make sure you modify the isolinux.cfg and point it at your answer file URL
+# You can find an example of the answer file in the "Setup and Usage Guide"
+#209 and 210 are DHCP options. 209 means "config file", and 210 means "path prefix"
+set 210:string ${boot_url}/xenclient-2.1/isolinux/
+set 209:string isolinux.cfg
+set filename ${210:string}/PXELinux/pxelinux.0
+chain ${filename} || goto failed
+:Code_End
+
+:Code_Begin #  Note openelec-generic-live
+
+:openelec-generic-live
+# Config from: http://wiki.openelec.tv/index.php?title=Network_Boot_-_NFS
+# and http://wiki.openelec.tv/index.php?title=Installation#Network_Boot_.28PXE.29
+echo Booting OpenELEC Generic 2.0.0 i386 
+set base-url ${boot_url}/openelec-generic-i386-2.0.0
+kernel ${base-url}/target/KERNEL initrd=SYSTEM
+initrd ${base-url}/target/SYSTEM
+# NFS/NBD/iSCSI boot support only works on v2 of OpenELEC
+# The NFS server must be specified as an IP, name resolution doesn't work :(
+imgargs KERNEL ip=dhcp boot=NFS=10.1.1.10:/raid/boot/openelec-generic-i386-2.0.0/target disk=NFS=10.1.1.10:/raid/misc/openelec-storage/ overlay
+boot || goto failed
+:Code_End
+
+:Code_Begin #  Note openelec-intel-gma-live
+
+:openelec-intel-gma-live
+# Config from: http://wiki.openelec.tv/index.php?title=Network_Boot_-_NFS
+# and http://wiki.openelec.tv/index.php?title=Installation#Network_Boot_.28PXE.29
+echo Booting OpenELEC Intel GMA 2.0.0 amd64 
+set base-url ${boot_url}/openelec-intel-amd64-2.0.0
+kernel ${base-url}/target/KERNEL initrd=SYSTEM
+initrd ${base-url}/target/SYSTEM
+# NFS/NBD/iSCSI boot support only works on v2 of OpenELEC
+# The NFS server must be specified as an IP, name resolution doesn't work :(
+imgargs KERNEL ip=dhcp boot=NFS=10.1.1.10:/raid/boot/openelec-intel-amd64-2.0.0/target disk=NFS=10.1.1.10:/raid/misc/openelec-storage/ overlay
+boot || goto failed
+:Code_End
+
+:Code_Begin #  Note ubuntu-live-1204-amd64
+
+:ubuntu-live-1204-amd64
+# See http://manpages.ubuntu.com/manpages/oneiric/man7/casper.7.html for casper cmdline details
+echo Booting Ubuntu Live 12.04 amd64 
+set base-url ${boot_url}/ubuntu-12.04-dvd-amd64
+kernel ${base-url}/casper/vmlinuz  initrd=initrd.lz
+initrd ${base-url}/casper/initrd.lz
+imgargs vmlinuz root=/dev/nfs boot=casper netboot=nfs nfsroot=10.1.1.10:/raid/boot/ubuntu-12.04-dvd-amd64 locale=en_US.UTF-8 keyboard-configuration/layoutcode=no mirror/country=NO
+boot || goto failed
+:Code_End
+
+:Code_Begin #  Note ubuntu-live-1204-i386
+
+:ubuntu-live-1204-i386
+# See http://manpages.ubuntu.com/manpages/oneiric/man7/casper.7.html for casper cmdline details
+echo Booting Ubuntu Live 12.04 i386 
+set base-url ${boot_url}/ubuntu-12.04-dvd-i386
+kernel ${base-url}/casper/vmlinuz initrd=initrd.lz
+initrd ${base-url}/casper/initrd.lz
+imgargs vmlinuz root=/dev/nfs boot=casper netboot=nfs nfsroot=10.1.1.10:/raid/boot/ubuntu-12.04-dvd-i386 locale=en_US.UTF-8 keyboard-configuration/layoutcode=no mirror/country=NO
+boot || goto failed
+:Code_End
+
+:Code_Begin #  Note mythbuntu-live-1204-amd64
+
+:mythbuntu-live-1204-amd64
+# See http://manpages.ubuntu.com/manpages/oneiric/man7/casper.7.html for casper cmdline details
+echo Booting Mythbuntu Live 12.04 x64 
+set base-url ${boot_url}/mythbuntu-12.04-desktop-amd64
+kernel ${base-url}/casper/vmlinuz initrd=initrd.lz
+initrd ${base-url}/casper/initrd.lz
+imgargs vmlinuz root=/dev/nfs boot=casper netboot=nfs nfsroot=10.1.1.10:/raid/boot/mythbuntu-12.04-desktop-amd64 locale=en_US console-setup/layoutcode=no
+boot || goto failed
+:Code_End
+
+:Code_Begin #  Note mythbuntu-live-1204-i386
+
+:mythbuntu-live-1204-i386
+# See http://manpages.ubuntu.com/manpages/oneiric/man7/casper.7.html for casper cmdline details
+echo Booting Mythbuntu Live 12.04 i386 
+set base-url ${boot_url}/mythbuntu-12.04-desktop-i386
+kernel ${base-url}/casper/vmlinuz initrd=initrd.lz
+initrd ${base-url}/casper/initrd.lz
+imgargs vmlinuz root=/dev/nfs boot=casper netboot=nfs nfsroot=10.1.1.10:/raid/boot/mythbuntu-12.04-desktop-i386 locale=en_US console-setup/layoutcode=no
+boot || goto failed
+:Code_End
+
+:Code_Begin #  Note slitaz-live
+
+:slitaz-live
+echo Booting SliTaz 4.0 LiveCD 
+set base-url ${boot_url}/slitaz-4.0/
+kernel ${base-url}/boot/bzImage
+initrd ${base-url}/boot/rootfs4.gz
+initrd ${base-url}/boot/rootfs3.gz
+initrd ${base-url}/boot/rootfs2.gz
+initrd ${base-url}/boot/rootfs1.gz
+imgargs bzImage rw root=/dev/null vga=normal autologin lang=en_US kmap=no-latin1
+boot || goto failed
+:Code_End
+
+:Code_Begin #  Note smartos
+
+:smartos
+echo Starting SmartOS 
+# Hook zones drive (optional)
+set root-path ${base_iscsi}${base_iqn}:smartos
+sanhook ${root-path} ||
+# See http://nahamu.github.com/2011/08/17/smartos-pxe.html for details
+set base-url ${boot_url}/smartos/platform/i86pc
+kernel ${base-url}/kernel/amd64/unix
+module ${base-url}/amd64/boot_archive
+# See http://wiki.smartos.org/display/DOC/Getting+Started+with+SmartOS
+# smartos=true to run zpool "installer" (and disable noimport=true)
+imgargs unix -v -B console=text,standalone=true,noimport=true,keyboard-layout=norway,root_shadow='$1$RKv<your-encrypted-password-here>eQCWk.'
+#imgargs unix -v -B console=text,standalone=true,smartos=true,keyboard-layout=norway,root_shadow='$1$RKv<your-encrypted-password-here>eQCWk.'
+boot || goto failed
+:Code_End
+
+:Code_Begin #  Note smartos-pre-ept
+
+:smartos-pre-ept
+echo Starting SmartOS (pre-ept branch) 
+# See http://nahamu.github.com/2011/08/17/smartos-pxe.html for details
+# pre-ept image downloaded from http://alpha.sysmgr.org/smartos-20120223-jmc2.iso
+# Posted by LeftWing on #illumos / FreeNode at 2012-04-11 09:09 UTC+2
+set base-url ${boot_url}/smartos/pre-ept/platform/i86pc
+kernel ${base-url}/kernel/amd64/unix
+module ${base-url}/amd64/boot_archive
+imgargs unix -v -B console=text,standalone=true,noimport=true,root_shadow='$1$RKv<your-encrypted-password-here>eQCWk.'
+boot || goto failed
+:Code_End
+
+:Code_Begin #  Note kms-test
+
+:kms-test
+echo Booting KMS-enabled Linux kernel 
+set base-url ${boot_url}/kms_test
+kernel ${base-url}/vmlinuz
+initrd ${base-url}/initrd ||
+imgargs vmlinuz rw root=/dev/nfs nfsroot=nas.smidsrod.lan:/raid/kms_test ip=dhcp ||
+boot || goto failed
+:Code_End
+
+
+
+#挂载其它启动方式
+:Code_Begin #  Note pxelinux
+
+:pxelinux
+imgfree
+echo ${cls}
+echo Loading pxelinux ...
+#dhcp
+#209 and 210 are DHCP options. 209 means "config file", and 210 means "path prefix" 好像只用于pxelinux 于ipxe无用
+set 210:string ${boot_url}/syslinux/
+#set 209:string pxelinux.cfg/default
+set 209:string pxelinux.cfg
+#set filename ${boot_url}/syslinux/pxelinux.0
+set filename ${210:string}/pxelinux.0
+chain ${filename} || goto failed
+:Code_End
+
+:Code_Begin #  Note grub4dos
+
+:grub4dos
+imgfree
+console
+set filename grldr #grub4dos环境是取filename中的路径作为basedir,不带任何路径的文字代表根目录 即 set basedir / 
+set net0/filename grldr
+set net0.dhcp/filename grldr
+
+kernel -a ${grub4dos_path}/${filename} --keeppxe --config-file="pxe detect;" || 
+boot
+#kernel  -a ${boot_url}${basedir}${filename}  --keeppxe --config-file="pxe keep;map (rd)+1 (0xff);map --hook;chainloader (0xff)" initrd=${iso_base_path}/0PE/0pe.iso ||
+#chain  --replace --autofree ${boot_url}${basedir}${filename} --config-file="pxe unload;" #卸载pxe环境
+#在grub4dos中的MENU語法
+#menu.lst
+#pxe keep && terminal console
+#title ipxegrldr.lkrn
+#kernel /boot/ipxe/ipxegrldr.lkrn
+#initrd /boot/ipxe/ipxe.pxe
+#title HTTP-undionly.kpxe
+#kernel (pd)/boot/ipxe/IPXE.KRN
+#initrd (pd)/boot/ipxe/bootstrap/default
+#chainloader --raw (pd)/boot/ipxe/ipxe.pxe
+boot || goto failed
+:Code_End
+
+:Code_Begin #  Note ipxegrldr
+
+:ipxegrldr
+imgfree
+set root-path ${boot_url}/grub
+console
+kernel ${root-path}/ipxegrldr ||
+chain  --replace --autofree ${root-path}/ipxegrldr --config-file="pxe unload;" ||
+boot || goto failed
+:Code_End
+
+
+:Code_Begin #  Note msboot
+
+:msboot
+imgfree
+chain  --replace --autofree ${boot_url}/pxeboot.n12  ||
+boot || goto failed
+:Code_End
+
+
+:Code_Begin #  Note grub_cd
+
+:grub_cd
+chain ${boot_url}/grub4dos/grub.exe --config-file="cdrom --init;map --hook;root (cd0);chainloader (cd0)" || goto failed
+:Code_End
+
+:Code_Begin #  Note grub_startrom
+
+:grub_startrom
+chain ${boot_url}/grub4dos/grub.exe keeppxe --config-file="pxe detect;chainloader --force --raw (pd)/startrom.0" || goto failed
+:Code_End
+
+:Code_Begin #  Note grub_floppy
+
+:grub_floppy
+chain ${boot_url}/grub4dos/grub.exe keeppxe --config-file="map --mem (pd)/images/98.ima (fd0);map --hook;root (fd0);chainloader+1;boot" || goto failed
+:Code_End
+
+:Code_Begin #  Note grub_hd0
+
+:grub_hd0
+chain ${boot_url}/grub4dos/grub.exe --config-file="rootnoverify (hd0);chainloader +1" || goto failed
+:Code_End
+
+:Code_Begin #  Note undi_dos
+
+:undi_dos
+kernel ${SyslinuxMemdisk} keeppxe ACTION=install NETSHARE=sharename 
+initrd ${img_base_path}/undis3c.imz
+boot || goto failed
+:Code_End
+
+:Code_Begin #  Note bootsan
+
+:bootsan
+#sanhook --drive 0x81 ${root-path} #hook a drive
+#sanboot --keep --no-describe --keep iscsi:10.0.4.1:::1:iqn.2010-04.org.ipxe.dolphin:liveinstall #boot from another media
+#sanboot iscsi:${iscsi-server}:tcp:3260:0:${iqn}
+set netX/gateway 0.0.0.0
+set net0/gateway 0.0.0.0
+sanboot --keep ${base_iscsi}:${base_iqn}
+#boot || goto failed
+:Code_End
+
+:Code_Begin #  Note bootaoe
+
+:bootaoe
+dhcp net0
+
+sanboot --keep aoe:e0.0
+#boot || goto failed
+:Code_End
+
+:Code_Begin #  Note netbootme
+
+:netbootme
+imgfree || ##  imgstat
+chain http://static.netboot.me/gpxe/netbootme.kpxe
+:Code_End
+
+:Code_Begin #  Note localboot
+
+:localboot
+sanboot --keep --no-describe --drive 0x80 || sanboot --keep --no-describe --drive 0x81 || sanboot --keep --no-describe --drive 0x82 || sanboot --keep --no-describe --drive 0x83 || sanboot --keep --no-describe --drive 0x84
+:Code_End
+
+#ButtomMenu Common高级常用菜单
+:Code_Begin #  Note common_function
+
+#<===================begin高级常用菜单=========================>
+:common_function
+set menu-timeout 0 #&& set menu-default ${premenu} 
+set ThisMenu common_function
+menu ${premenu} --${ThisMenu} --${platform}--${ip}
+item --key 0x5c goTopMenu /  ;  item --key 0x08 ${premenu} ..  ; set premenu ${ThisMenu} 
+item --gap -- -------------------- ${ThisMenu} --------------------
+item
+item --key d 		Grub_cd								[D]vd (via grub4dos) 
+item --key b 		grub_startrom 						[B]oot to startrom.0 (via grub4dos) 
+item --key b 		grub_floppy 							[B]oot floppy (via grub4dos) 
+item --key b 		grub_hd0 							[B]oot to hd0 (via grub4dos) 
+item 		
+item --key 0x03 	Exit									[E]xit iPXE to Local boot  
+item --key i 		ipxeconfig 							[I]pxe gui configure 
+item --key d 		Shell 								[D]rop to ipxe shell  
+item --key s 		Set_nextserverIP 						[S]et next-server ip add
+item --key o 		on_offline							[S]et Switch boot server (wan/lan)
+item --key 0x09 	showVardebug						[V]ardebug show on/off
+item --key n 		netinfo								[N]et ether information
+item --key r 		Reboot 								[R]eboot the computer  
+item --key p 		PowerOff 							[P]oweroff the computer 
+#item --gap -- --------------------------------------------------------
+goto function_var
+#<===================end高级常用菜单=========================>
+:Code_End
+:Code_Begin #  Note ButtomMenu
+:ButtomMenu
+item --gap -- 	-------------------- Advanced options -------------------- 
+item --key 0x147e common_function		common functoin menu
+item --gap -- 	---------------------------------------------------------
+
+:function_var
+##############set list_info_top:string -------------------- 常用变量列表 ------------------- 
+set list_No:int32 1
+set list_info_${list_No}:string      -------------------- Machine infomation ------------------------					&& inc list_No ||
+set list_info_${list_No}:string  	 											  							 			&& inc list_No ||
+set list_info_${list_No}:string hostname: ${hostname} | ip: ${ip} | netX/mac: ${netX/mac}  								&& inc list_No ||
+set list_info_${list_No}:string dns: ${dns} | netX/gateway: ${netX/gateway}  												&& inc list_No ||
+set list_info_${list_No}:string boot_server: ${boot_server} 					 											&& inc list_No ||
+set list_info_${list_No}:string boot_url: ${boot_url}  																	&& inc list_No ||
+set list_info_${list_No}:string filename: ${filename} 																	&& inc list_No ||
+set list_info_${list_No}:string iscsi_server: ${iscsi_server} 					 											&& inc list_No ||
+set list_info_${list_No}:string nfs_server: ${nfs_server} 					 											&& inc list_No ||
+set list_info_${list_No}:string ftp_server: ${ftp_server} 					 											&& inc list_No ||
+set list_info_${list_No}:string web_server: ${web_server} 					 											&& inc list_No ||
+set list_info_${list_No}:string imgfilename: ${imgfilename} 																&& inc list_No ||
+set list_info_${list_No}:string isofilename: ${isofilename} 																&& inc list_No ||
+set list_info_${list_No}:string pefilename: ${pefilename} 																&& inc list_No ||
+set list_info_${list_No}:string vhdfilename: ${pefilename} 																&& inc list_No ||
+set list_info_${list_No}:string ccboot_tftp_path: ${ccboot_tftp_path}														&& inc list_No ||
+set list_info_${list_No}:string iscsi_path: ${iscsi_path} 																&& inc list_No ||
+set list_info_${list_No}:string initiator-iqn: ${initiator-iqn} 															&& inc list_No ||
+set list_info_${list_No}:string root-path: ${root-path} 																	&& inc list_No ||
+set list_info_${list_No}:string username: ${username} - password: ${password} 											&& inc list_No ||
+set list_info_${list_No}:string user-class: ${user-class} 																&& inc list_No ||
+set list_info_${list_No}:string c32_base_path: ${c32_base_path} 															&& inc list_No ||
+set list_info_${list_No}:string Platform: ${platform} - Buildarch: ${buildarch}  								 			&& inc list_No ||
+#set list_info_${list_No}:string  	 --------------------------------------------------------------- 						&& inc list_No ||
+#set list_info_end:string ---------------------------------------------------------
+iseq ${vardebug} 1 || goto MenuEndtoChoose
+#set ReturnMenuPoint ${ThisMenu} ; goto function_Listinfo
+#_Machineinfo menu列示相关菜单 list_No变量为总行数，调用方法，先设置好list_info_$no及相关内容,ReturnMenuPoint为返回点
+:function_Listinfo #item --gap -- ${list_info_top} 
+set listNo:int32 1
+item --gap
+:list_begin
+iseq ${listNo} ${list_No} && goto list_end ||
+item --gap -- ${list_info_${listNo}} && inc listNo && goto list_begin
+:list_end #item --gap -- ${list_info_end}
+#goto ${ReturnMenuPoint}
+:MenuEndtoChoose 
+choose --timeout ${menu-timeout} --default ${menu-default} selected && goto ${selected} || goto cancel
+
+:Code_End
+
+
+
+
+
+#常用功能函数#
+#Memdisk via iPXE vs. iso Boot HTTP via iPXE:
+#Memdisk via iPXE does the following things: 
+#1) Emulates a CD-ROM allowing a Network-Based Install. 
+#2) Masks actual system RAM because the environment memdisk creates "hides" a certain amount of RAM to allow for the iso - This amount is generally 2x iso Size (Maximum 2GB - I think).
+#3) Preloads the iso into memory before executing the iso. This slows boot time a bit.
+#iso Boot over HTTP via iPXE:
+#1) Does not emulate a CD-ROM. It is a Block Device.
+#2) Does not mask system RAM.
+#3) Executes as it reads: Faster than memdisk and no "preloading" of the iso is required.
+#4) Does not hold the iso as a readable device once the iso is loaded unless loaded into the iBFT.
+
+:Code_Begin #  Note shell set echoReturnPoint shell_echook && goto Function_StarEcho 
+
+:shell set echoReturnPoint shell_echook && goto Function_StarEcho 
+:shell_echook 
+echo Dropping to shell. 'exit' to get the back to the pxe bootmenu 
+echo
+shell ||
+goto ${platformStart}
+:Code_End
+
+:Code_Begin #  Note cancel
+
+:cancel
+echo
+echo You cancelled the menu, dropping you to a shell. 
+goto shell
+:Code_End
+
+:Code_Begin #  Note failed
+
+:failed
+echo
+echo Booting failed, dropping to shell
+goto shell
+:Code_End
+
+:Code_Begin #  Note Reboot reboot
+
+:Reboot reboot
+:Code_End
+
+:Code_Begin #  Note PowerOff poweroff
+
+:PowerOff poweroff
+:Code_End
+
+:Code_Begin #  Note Exit set echoReturnPoint exit_echook && goto Function_StarEcho #调用显示各类变量
+
+:Exit set echoReturnPoint exit_echook && goto Function_StarEcho #调用显示各类变量
+:exit_echook
+exit 0
+:Code_End
+
+:Code_Begin #  Note ipxeconfig config && goto ${platformStart} ||
+
+:ipxeconfig config && goto ${platformStart} ||
+:Code_End
+
+:Code_Begin #  Note goTopMenu
+
+:goTopMenu
+#:back
+set menu-timeout 0
+#clear menu-default
+goto ${platformStart}
+:Code_End
+
+:Code_Begin #  Note showVardebug
+
+:showVardebug
+iseq ${vardebug} 0 && set vardebug:int32 1 || set vardebug:int32 0 ||
+goto ${premenu}
+:Code_End
+
+
+:Code_Begin #  Note 取未位数ip到Function_GetLastIp
+:Function_GetLastIp
+set Function_GetLastIp:int32 1 ||
+:GetIploop
+iseq ${IPin} 192.168.1.${Function_GetLastIp} && goto ${ReturnMenuPoint} ||
+inc Function_GetLastIp && goto GetIploop ||
+:endFunction_GetLastIp
+:Code_End
+
+:Code_Begin #  Note Function_StarEcho #取相关list_info_? 字行内容并显示的功能函数 调用时先设置好list_info_字符串数组，直接输出结果
+
+:Function_StarEcho #取相关list_info_? 字行内容并显示的功能函数 调用时先设置好list_info_字符串数组，直接输出结果
+set echoNo:int32 1
+:echo_begin
+iseq ${echoNo} ${list_No} && goto echo_end || 
+echo | ${list_info_${echoNo}:string} && inc echoNo && goto echo_begin
+:echo_end
+echo
+prompt --key 0x02 --timeout 1000 Press Ctrl-B enter the iPXE shell... && shell || goto ${echoReturnPoint}
+:EndFunction_StarEcho
+:Code_End
+
+:Code_Begin #  Note Function_ipxe_Wimboot
+
+:Function_ipxe_Wimboot
+# rawbcd: Disable rewriting .exe to .efi in the BCD file.
+# gui: Display graphical boot messages.
+# pause[=quiet]: Show info and wait for keypress.
+# index=n: Use WIM image index n.
+# initrdfile: Ignored. For syslinux compatibility.
+#imgfetch --name <somename> <uri> <somename>
+imgfree ||
+echo bootwimfile: ${bootwimfile}
+isset ${kernelfile} && kernel ${kernelfile} gui || kernel ${boot_url}/ipxe/wimboot gui rawbcd #index=1 pause || goto failed
+isset ${wimbcd} && initrd ${wimbcd} ${wimbcd_newname} || initrd ${wimbcd} BCD || goto failed
+initrd ${wimsdi} boot.sdi || goto failed
+isset ${wimbootmgr} && initrd ${wimbootmgr} ${wimbootmgr_newname} || #goto failed #指定自定义启动管理器文件
+#isset ${Injectedfile} && initrd --name ${Injected_newname} ${Injectedfile} || goto wimcontinu
+isset ${Injectedfile} && initrd ${Injectedfile} ${Injected_newname} && goto wimcontinu ||
+initrd ${boot_url}/PETools/AutoRuns/winpeshl.ini ||
+initrd --name winpeshl.cmd ${boot_url}/PETools/AutoRuns/pxeautorun.txt ||
+initrd ${boot_url}/PETools/AutoRuns/startup.bat ||
+initrd --name winpe.jpg ${boot_url}/PETools/AutoRuns/DefBG.jpg ||
+:wimcontinu
+initrd ${bootwimfile} boot.wim || goto failed  #initrd ${boot_url}/ipxe/bootmgr.exe bootmgr.exe || 
+imgstat
+#prompt --key 0x02 --timeout 500 Press Ctrl-B for the iPXE shell... && shell || 
+boot 
+:Code_End
+
+:Code_Begin #  Note Function_imgBoot
+
+:Function_imgBoot
+imgfree  || ##  imgstat
+echo imgfilename: ${imgfilename}
+kernel ${SyslinuxMemdisk} initrd=${imgfilename} raw keeppxe || 
+initrd ${imgfilename} || 
+#module ${boot_url}/modules/busybox
+#module init.sh
+#imgstat && prompt --key 0x02 --timeout 30000 Press Ctrl-B for the iPXE shell... && shell || 
+boot || goto failed
+:Code_End
+
+:Code_Begin #  Note Function_vhdBoot
+
+:Function_vhdBoot
+imgfree || ##  imgstat
+echo vhdfilename: ${vhdfilename}
+
+iseq ${platform} pcbios && set keep-san 1 && sanboot --drive 0x80 ${vhdfilename} && boot ||
+iseq ${platform} efi && set keep-san 1 && sanboot --no-describe ${vhdfilename} && boot ||
+
+initrd ${vhdfilename} || goto failed
+kernel ${SyslinuxMemdisk} raw keeppxe || goto failed
+boot || goto failed
+:Code_End
+
+:Code_Begin #  Note Function_isoMemBoot
+
+:Function_isoMemBoot
+imgfree  || ##  imgstat
+echo isofilename: ${isofilename}
+kernel ${SyslinuxMemdisk} iso raw initrd=${isofilename} || goto failed
+initrd ${isofilename} || goto failed
+boot || goto failed
+:Code_End
+
+:Code_Begin #  Note Function_isoSanBoot
+
+:Function_isoSanBoot
+imgfree || ##  imgstat
+echo isofilename: ${isofilename}
+#sanunhook ||
+set iso_root-path ${isofilename} ||
+#sanhook --no-describe --drive 0x01 ${boot_url}/SISO/FIRADISK.IMG ||
+sanboot --keep --no-describe --drive 0x80 ${iso_root-path} || sanhook --no-describe --drive 0x80 ${iso_root-path} || 
+#imgstat && prompt --key 0x02 --timeout 3000 Press Ctrl-B for the iPXE shell... && shell || 
+sanboot --keep --no-describe --drive 0xff ${iso_root-path} || goto failed 
+:Code_End
+
+:Code_Begin #  Note nfsboot
+
+:nfsboot
+kernel http://server/vmlinuz1
+initrd initrd --timeout 2000 http://server/initrd1
+imgargs vmlinuz1 root=/dev/nfs boot=live netboot=nfs nfsroot=server:/nfsroot/current
+#imgargs vmlinuz root=/dev/nfs boot=casper netboot=nfs nfsroot=10.1.1.10:/raid/boot/mythbuntu-12.04-desktop-i386 locale=en_US console-setup/layoutcode=no
+boot
+:Code_End
+
+:Code_Begin #  Note on_offline
+
+:on_offline
+iseq ${boot_server} ${next-server} && set boot_server ${wlan_pxe_server} || set boot_server ${next-server} 
+goto setBootProtocol
+:Code_End
+
+:Code_Begin #  Note Set_nextserverIP
+
+:Set_nextserverIP
+#set backspace:hex 08 && set backspace ${backspace:string}
+echo -n inpute [next-server]'s ip to switch boot: ${} && read next-server ||
+prompt  --timeout 3000   Press anykey to Change iscsi-server: ${iscsi_server} && \
+				 echo -n Enter newip to Change iscsi-server: ${} && read iscsi_server ||
+goto setBootProtocol
+:Code_End
+
+
+
+
+# hotkeyKey #Key	Keycode #http://ascii.911cha.com/  有对照查询
+#Ctrl-A	0x01 #Ctrl-B	0x02 #Ctrl-C	0x03 #…  0x5c \ 0x09 Tab
+#Ctrl-Z	0x1a #F5	0x107e #F6	0x127e #F7	0x137e #F8	0x147e #F9	0x157e #F10 0x167e #F11 0x187e #F12 0x197e
+#================ Main Menu =================
+#cpair --foreground 7 --background 1 2 && cpair --foreground 9 --background 1 0 || #活动选项条目颜色
+#色号 0 (black) 1 (red) 4 (blue or transparent) 6 (cyan) 7 (white) 9 (default: white)	9 (default: black or transparent)
+#项目索引
+#0	Default colour					
+#1	Normal user interface text		
+#2	Highlighted text				
+#3	Separators						
+#4	Editable text					
+#5	Error messages					
+#6	Help URLs						
+#7	PXE menu selection				
+
+#0	Default colour					9 (default: white)	9 (default: black or transparent)
+#1	Normal user interface text		7 (white)	4 (blue or transparent)
+#2	Highlighted text				7 (white)	1 (red)
+#3	Separators						6 (cyan)	4 (blue or transparent)
+#4	Editable text					0 (black)	6 (cyan)
+#5	Error messages					7 (white)	1 (red)
+#6	Help URLs						6 (cyan)	4 (blue or transparent)
+#7	PXE menu selection				0 (black)	7 (white)
+
+# Feature set	Register	Bit	Feature	Command
+# Extended	%edx	29	Long mode (64-bit)	cpuid --ext 29
+# Standard	%edx	6	Physical address extensions (PAE)	cpuid 6
+# Standard	%ecx	5	Intel Virtual Machine Extensions (VMX)	cpuid --ecx 5
+# Extended	%ecx	2	AMD Secure Virtual Machine (SVM)	cpuid --ext --ecx 2
+# Standard	%edx	15	Conditional Move (CMOV)	cpuid 15
+#show ${93:string}
+#iseq ${93:string} 0 && set bootfilename bin/undionly.kpxe
+#iseq ${93:srting} 6 && set bootfilename bin-i386-efi/ipxe.efi
+#iseq ${93:string} 7 && set bootfilename bin-x86_64-efi/ipxe.efi
+#iseq ${93:string} 9 && set bootfilename bin-x86_64-efi/ipxe.efi
+#iseq ${93:srting} 10 && set bootfilename bin-arm32-efi/ipxe.efi
+#iseq ${93:srting} 11 && set bootfilename bin-arm64-efi/ipxe.efi
+
+# 00000 - Intel x86PC
+# 00001 - NEC/PC98
+# 00002 - EFI Itanium
+# 00003 - DEC Alpha
+# 00004 - Arc x86
+# 00005 - Intel Lean Client
+# 00006 - EFI IA32
+# 00007 - EFI BC
+# 00008 - EFI Xscale
+# 00009 - EFI x86-64
+###unbuntu 编译方法 
+#直接在 git.ipxe.org/ipxe 下载最新的文件解包到 ipxe下
+#git init
+#git fetch git://git.ipxe.org/ipxe.git 更新
+##git clone git://git.ipxe.org/ipxe.git
+#git clone git://git.kernel.org/pub/scm/boot/syslinux/syslinux.git
+
+#sudo nautilus
+#sudo apt-get install build-essential binutils build-depgcc perl git git-cor  nasm isolinux pxelinux liblzma-dev liblzma mtools mkisofs zlib1g-dev libssl-dev  tcl8.4 tk8.4 gettext
+
+#sudo mount 192.168.1.8:/pxe/ipxe/Github_ipxe ~/github
+#cd ~/github
+##sudo chown administrator github -R
+##sudo  chown administrator config/general.h
+##sudo  chown administrator default
+
+#cd ipxe/src
+#打开console_cmd 时要打开console.h 下的console_framebuffer才可使用背景图
+#make
+#make bin/ipxe.pxe EMBED=default
+#make bin/ipxe.usb EMBED=default
+#make bin/ipxe.iso EMBED=default
+#make bin/ipxe.lkrn EMBED=default
+#make bin/ipxe.kpxe EMBED=default
+#make bin/ipxe.kkpxe EMBED=default
+#make bin/ipxe.kkkpxe EMBED=default
+#make bin/undionly.kpxe EMBED=default
+#make bin/undionly.kkpxe EMBED=default
+#make bin/undionly.kkpxe EMBED=default
+
+#编译EFI平台时请在src/config/general.h注意关闭nfs 与pxe
+#undef	DOWNLOAD_PROTO_NFS   
+#define PXE_CMD		/* PXE commands */
+#make bin-x86_64-efi/ipxe.efi EMBED=default
+#make bin-x86_64-efi/snponly.efi EMBED=default
+#fdiks -l
+##make bin/ipxe.usb EMBED=default
+#dd if=bin/ipxe.usb of=/dev/sdb
+
+# IPXE的DHCP选项,严格来说就是对175选项的设置。
+# 以Tiny PXE Server为列子
+# 175.6.8.1.1.176.1.1
+# 解释一下，175，选项
+# 6，长度
+# 8.1.1，IPXE选项8，长度1，值1，也就是设置keep-san=1
+# 176.1.1，IPXE选项176，长度1，值1，也就是设置no-pxedhcp=1
+# 在一个列子
+# 175.22.8.1.1.176.1.1.190.4.117.115.101.114.191.8.49.50.51.52.53.54.55.56
+# 175后面22是长度
+# 8.1.1.176.1.1同上
+# 190.4.117.115.101.114是选项190，长度4，值117.115.101.114,其实这个是ASCII码，代表user。实现的是username=user
+# 191.8.49.50.51.52.53.54.55.56是选项191，长度8，值49.50.51.52.53.54.55.56，转换后是12345678.实现的是password=12345678
+# option space ipxe;
+  # option ipxe-encap-opts code 175 = encapsulate ipxe;
+  # option ipxe.priority code 1 = signed integer 8;
+  # option ipxe.keep-san code 8 = unsigned integer 8;
+  # option ipxe.skip-san-boot code 9 = unsigned integer 8;
+  # option ipxe.syslogs code 85 = string;
+  # option ipxe.cert code 91 = string;
+  # option ipxe.privkey code 92 = string;
+  # option ipxe.crosscert code 93 = string;
+  # option ipxe.no-pxedhcp code 176 = unsigned integer 8;
+  # option ipxe.bus-id code 177 = string;
+  # option ipxe.bios-drive code 189 = unsigned integer 8;
+  # option ipxe.username code 190 = string;
+  # option ipxe.password code 191 = string;
+  # option ipxe.reverse-username code 192 = string;
+  # option ipxe.reverse-password code 193 = string;
+  # option ipxe.version code 235 = string;
+  # option iscsi-initiator-iqn code 203 = string;
+  # Feature indicators
+  # option ipxe.pxeext code 16 = unsigned integer 8;
+  # option ipxe.iscsi code 17 = unsigned integer 8;
+  # option ipxe.aoe code 18 = unsigned integer 8;
+  # option ipxe.http code 19 = unsigned integer 8;
+  # option ipxe.https code 20 = unsigned integer 8;
+  # option ipxe.tftp code 21 = unsigned integer 8;
+  # option ipxe.ftp code 22 = unsigned integer 8;
+  # option ipxe.dns code 23 = unsigned integer 8;
+  # option ipxe.bzimage code 24 = unsigned integer 8;
+  # option ipxe.multiboot code 25 = unsigned integer 8;
+  # option ipxe.slam code 26 = unsigned integer 8;
+  # option ipxe.srp code 27 = unsigned integer 8;
+  # option ipxe.nbi code 32 = unsigned integer 8;
+  # option ipxe.pxe code 33 = unsigned integer 8;
+  # option ipxe.elf code 34 = unsigned integer 8;
+  # option ipxe.comboot code 35 = unsigned integer 8;
+  # option ipxe.efi code 36 = unsigned integer 8;
+  # option ipxe.fcoe code 37 = unsigned integer 8;
+  # option ipxe.vlan code 38 = unsigned integer 8;
+  # option ipxe.menu code 39 = unsigned integer 8;
+  # option ipxe.sdi code 40 = unsigned integer 8;
+  # option ipxe.nfs code 41 = unsigned integer 8;
