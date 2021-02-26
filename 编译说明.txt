@@ -1,0 +1,14 @@
+﻿When submitting binaries for UEFI Secure Boot signing, certain
+known-dubious subsystems (such as 802.11 and NFS) must be excluded
+from the build.  Mark the directories containing these subsystems as
+insecure, and allow the build target to include an explicit "security
+flag" (a literal "-sb" appended to the build platform) to exclude
+these source directories from the build process.
+
+For example:
+
+  make bin-x86_64-efi-sb/ipxe.efi
+
+will build iPXE with all code from the 802.11 and NFS subsystems
+excluded from the build.
+

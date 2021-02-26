@@ -1,0 +1,126 @@
+Etherboot command-line
+
+Network Interfaces
+Etherboot names interfaces following the pattern “net#”. The special network interface alias “netX” refers to the last opened network interface.
+
+ifstat [interfaces…] Displays information and statistics about the specified interface. If no interface is specified, displays information about all detected interfaces. Information includes MAC address, PCI bus/slot/function identiers, and packet counts.
+
+ifopen [interfaces…] Opens the specified interfaces. If no interface is specified, opens all interfaces.
+
+ifclose [interfaces…] Closes the specified interfaces. If no interface is specified, closes all interfaces.
+
+dhcp <interface> Attempts to configure the specified network interface using DHCP. Also opens the interface.
+
+Working with images
+imgfetch [-n|–name <image name>] <filename> [arguments…] Retrieves an image file, giving it a specified name, and prepares it to be executed with the specified arguments. File name may be a simple path, or an HTTP URL. Simple paths are assumed to be located on the TFTP server specified by dhcp or the filename configuration setting. If image name is not specified, the base filename will be used as the name.
+
+module [-n|–name <image name>] <filename> [arguments…] Equivalent to imgfetch
+
+initrd [-n|–name <image name>] <filename> [arguments…] Equivalent to imgfetch
+
+imgargs <image name> Set or change the arguments for the specified image name.
+
+imgload <image name> Prepares an executable image to be booted. Executable image formats:
+
+gPXE script
+NBI image
+PXE image
+MultiBoot image
+a.out image
+ELF image
+WinCE image
+FreeBSD kernel
+Linux bzImage kernel
+imgexec [image name] Execute the loaded image, or a specified image. If more than one image is loaded, the image must be specified. Note, if the specified image is not the most recently loaded one, Bad Things will almost certainly happen. This should only be done in special cases.
+
+boot [image name] Equivalent to imgexec
+
+chain [image name/URI] This will fetch, load, then execute either an embedded image or one specified by the URI. Equivalent to imgfetch, then imgload, and then imgexec.
+
+imgfree [image name] Free one or all executable/loadable images.
+
+imgstat List images currently held in memory.
+
+kernel [-n|–name <image name>] <filename> [arguments] Fetch and load a bzImage format Linux kernel. Equivalent to an imgfetch followed by imgload.
+
+Runtime configuration
+config [scope] Enter a GUI to set up runtime configuration. On some systems (cards) this may be stored in NVRAM. Scope allows the GUI to override or view specific subsets of options. (see below)
+
+set <identifier> <value> Set the value of identifier to value.
+
+show <identifier> Display the value of identifier
+
+clear <identifier> Clear the value of identifier
+
+Identifiers
+Identifiers could be considered “variables” in the gPXE shell (CLI and scripts). You can type:
+
+${identifier}
+as part of a command, and it will be substituted for the fetched setting corresponding to that identifier. For example:
+
+chain http://${next-server}/boot.php?mac=${net0/mac}
+is a command which would have the next-server setting substituted into the URI, as well as pass the net0 interface's MAC address as a parameter to a PHP script on the web-server.
+
+All identifiers are set within a scope.
+
+root (scope unspecified)
+proxydhcp Settings from a Proxy DHCP server (Needs more description)
+[interface] e.g. net0. Settings for a network device.
+[interface].dhcp. Settings from the DHCP server acquired by interface. Read/write, but note that you cannot specify new options that were not already provided.
+[interface].nvo. Read/write settings in NVRAM on certain supported cards. WARNING this permanently modifies settings on your network card. It is possible to damage your network card by changing settings in this context. Use at your own risk.
+smbios. Read-only access to settings in the System Management BIOS (see below)
+Identifiers follow the format [scope/]identifier[:type]. For example, to set the IP address of the 'net0' card use set net0/ip XXX.XXX.XXX.XXX
+
+Options not specified in a higher scope will be read from a lower one. So if the option ip is unspecified, it will be read from net0/ip; if the option net0/ip is unspecified, it will be read from net0.dhcp.
+
+Root
+hostname The system's hostname. Sent to the DHCP server for dynamic DNS changes, or specified by the DHCP server. Equivalent to DHCP option 12 (host name)
+
+filename The boot image to be loaded. Equivalent to DHCP option 67 (Bootfile name)
+
+root-path NFS/iSCSI root path. The path to a network root filesystem. Equivalent to DHCP option 17 (Root Path)
+
+iSCSI root path syntax: iscsi:<servername>:[protocol]:[port]:[LUN]:<targetname>
+username Username to be used for any authentication. Currently only used by iSCSI.
+
+password Password to be used for any authentication. Currently only used by iSCSI. Intended to be stored in card NVRAM, but see warning above.
+
+priority
+
+Network device
+ip The device's IPv4 address
+
+netmask The device's IPv4 subnet mask
+
+gateway The device's default gateway
+
+mac The device's MAC address
+
+dhcp-server The dhcp server from which settings were obtained
+
+dns The DNS server to use for resolving hostnames
+
+next-server The (TFTP) server from which to obtain files when not specifying an HTTP URL
+
+initiator-iqn The iSCSI initiator name
+
+<dhcp_opt_num>:<format> Set a DHCP option by its number (ie. 209:string for PXELINUX config file override)
+
+busid This yields a five-byte hexadecimal code representing the adapter's bus type, followed by the two-byte vendor ID, followed by the two-byte device ID. This could be handy for fetching an initrd or other RAM disk image containing the OS driver for the particular network adapter. For example:
+
+gPXE> initrd http://webserver/initrd-${net0/busid}
+SMBIOS
+Read-only access to the system's Systems Management BIOS. Identifiers follow the format <type>.<offset>.<length>:<format>. Example: To read the Manufacturer name, get smbios/1.4.0:string will read SMBIOS offset 4 as a string. Valid formats: string, uristring (for URI-friendly string format), ipv4, int8, int16, int32, uint8, uint16, uint32, hex, uuid
+
+uuid The system's UUID
+
+Other
+autoboot Attempts to boot the system, on each network interface in turn, as follows:
+
+Wait for a link on ethernet
+Configure via DHCP
+Download (and exec) the DHCP-specified boot filename
+Boot from the DHCP-specified root path, using iSCSI or ATA-over-Ethernet (AoE)
+exit Exits gPXE, and passes boot control back to the BIOS, which generally attempts to boot the system using the next available boot method.
+
+sanboot Attempts to boot the system from a SAN device (iSCSI or AoE) using the DHCP-specified root path.
